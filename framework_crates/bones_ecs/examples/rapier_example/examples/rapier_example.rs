@@ -4,7 +4,7 @@ use bones_ecs::prelude::*;
 use nalgebra::Vector2;
 use rapier2d::prelude::*;
 use rapier_example::{
-    debug_renderer::{DebugRenderer, Game},
+    debug_renderer::{self, Game},
     physics::{CollisionWorld, PhysicsHandle, RapierUserData, Vec2},
 };
 
@@ -21,7 +21,7 @@ fn main() {
         .add_system_to_stage(CoreStage::Update, update_physics_positions2);
 
     let game = Game::new(world, stages);
-    DebugRenderer::start(game);
+    debug_renderer::start(game);
 }
 
 #[derive(Clone, Debug, HasSchema, Default, Deref, DerefMut)]
@@ -65,7 +65,7 @@ fn startup_system(
 
     collision_world.insert_collider(triangle);
 
-    for i in 0..50 {
+    for i in 0..20 {
         let ent = entities.create();
         let radius = (i % 6) as f32 * 0.1 + 0.05;
         let handle = collision_world.create_ball(ent, radius, 5.0, Default::default());
@@ -151,7 +151,9 @@ fn apply_inputs(
 
 /// Step physics engine
 fn step_physics_world(mut collision_world: CollisionWorld) {
+    let time = Instant::now();
     collision_world.step();
+    println!("Physics step time: {:?}", time.elapsed());
 }
 
 fn update_physics_positions(

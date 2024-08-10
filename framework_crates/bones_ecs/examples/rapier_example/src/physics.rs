@@ -110,16 +110,7 @@ impl RapierContext {
     }
 
     pub fn debug_render(&self, backend: &mut impl DebugRenderBackend) {
-        let mut pipeline = DebugRenderPipeline::new(
-            DebugRenderStyle {
-                subdivisions: 8,
-                border_subdivisions: 5,
-                ..Default::default()
-            },
-            DebugRenderMode::default(),
-        );
-
-        //let mut pipeline = DebugRenderPipeline::default();
+        let mut pipeline = DebugRenderPipeline::default();
         pipeline.render_colliders(backend, &self.rigid_bodies, &self.colliders);
     }
 

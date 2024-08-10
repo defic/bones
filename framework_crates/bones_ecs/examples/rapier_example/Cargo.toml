@@ -9,6 +9,5 @@ bones_ecs = { path = "../.." }
 rapier2d = { version = "0.22.0", features = ["enhanced-determinism", "debug-render"] }
 bones_ecs_macros = { path = "../../macros" }
 
-nonaquad = "0.1.2"
-nona = "0.1.2"
-miniquad = "0.3.0-alpha.37"
+# debug rendering (macroquad has nice ergonomics for drawing lines etc)
+macroquad = "0.4.11"
