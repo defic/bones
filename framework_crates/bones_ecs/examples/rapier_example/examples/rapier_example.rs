@@ -88,34 +88,14 @@ struct Input {
     left: bool,
 }
 
+#[rustfmt::skip]
 impl Input {
-    pub fn up() -> Self {
-        Input {
-            up: true,
-            ..Default::default()
-        }
-    }
-    pub fn right() -> Self {
-        Input {
-            right: true,
-            ..Default::default()
-        }
-    }
-    pub fn down() -> Self {
-        Input {
-            down: true,
-            ..Default::default()
-        }
-    }
-    pub fn left() -> Self {
-        Input {
-            left: true,
-            ..Default::default()
-        }
-    }
-    pub fn none() -> Self {
-        Default::default()
-    }
+    pub fn up() -> Self { Self { up: true, ..Default::default() }}
+    pub fn right() -> Self { Self { right: true, ..Default::default() }}
+    pub fn down() -> Self { Self { down: true, ..Default::default() }}
+    pub fn left() -> Self { Self { left: true, ..Default::default() }}
+    pub fn none() -> Self { Default::default() }
+
     pub fn to_vec2(&self) -> Vec2 {
         let x = (self.right as i8 - self.left as i8) as f32;
         let y = (self.up as i8 - self.down as i8) as f32;
