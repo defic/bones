@@ -13,5 +13,10 @@
         "bones_camera_shake",
         "type_ulid",
         "quinn_runtime_bevy",
+    ],
+
+    "rust-analyzer.linkedProjects": [
+        "framework_crates/bones_ecs/examples/rapier_example/Cargo.toml"
     ]
 }
+

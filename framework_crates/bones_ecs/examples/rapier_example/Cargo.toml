@@ -1,0 +1,14 @@
+
+[package]
+name    = "rapier_example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bones_ecs = { path = "../.." }
+rapier2d = { version = "0.22.0", features = ["enhanced-determinism", "debug-render"] }
+bones_ecs_macros = { path = "../../macros" }
+
+nonaquad = "0.1.2"
+nona = "0.1.2"
+miniquad = "0.3.0-alpha.37"
