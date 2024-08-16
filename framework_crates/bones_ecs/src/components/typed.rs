@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, rc::Rc};
+use std::{hash::Hash, marker::PhantomData, rc::Rc};
 
 use crate::prelude::*;
 
@@ -9,6 +9,22 @@ use super::untyped::UntypedComponentStore;
 pub struct ComponentStore<T: HasSchema> {
     untyped: UntypedComponentStore,
     _phantom: PhantomData<T>,
+}
+
+impl<T: HasSchema> ComponentStore<T> {
+    pub fn serialize(&self) -> Vec<u8> {
+        //should only do schemas that can be (de)serialized?
+        self.untyped.serialize()
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> ComponentStore<T> {
+        //should only do schemas that can be (de)serialized?
+
+        Self {
+            untyped: UntypedComponentStore::deserialize(bytes, T::schema()).unwrap(),
+            _phantom: PhantomData::<T>,
+        }
+    }
 }
 
 impl<T: HasSchema> Default for ComponentStore<T> {

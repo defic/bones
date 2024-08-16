@@ -1,8 +1,11 @@
 use std::{
     alloc::{self, handle_alloc_error, Layout, LayoutError},
     ffi::c_void,
+    io::Read,
     ptr::NonNull,
 };
+
+use crate::Schema;
 
 use super::layout::*;
 
@@ -23,6 +26,52 @@ pub struct ResizableAlloc {
     padded: Layout,
     /// The current capacity measured in items.
     cap: usize,
+}
+impl ResizableAlloc {
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        // Serialize the capacity
+        bytes.extend_from_slice(&(self.cap as u64).to_le_bytes());
+
+        // Serialize the actual data
+        unsafe {
+            let data_slice = std::slice::from_raw_parts(
+                self.ptr.as_ptr() as *const u8,
+                self.cap * self.padded.size(), // Use padded size to include alignment padding
+            );
+            bytes.extend_from_slice(data_slice);
+        }
+
+        bytes
+    }
+
+    pub fn deserialize(
+        bytes: &[u8],
+        schema: &'static Schema,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut cursor = std::io::Cursor::new(bytes);
+
+        // Deserialize the capacity
+        let mut cap_bytes = [0u8; std::mem::size_of::<u64>()];
+        cursor.read_exact(&mut cap_bytes)?;
+        let cap = u64::from_le_bytes(cap_bytes) as usize;
+
+        // Create a new ResizableAlloc and resize it
+        let mut alloc = ResizableAlloc::new(schema.layout());
+        alloc.resize(cap)?;
+
+        // Read the serialized data into the allocation
+        unsafe {
+            let data_slice = std::slice::from_raw_parts_mut(
+                alloc.ptr.as_ptr() as *mut u8,
+                cap * alloc.padded.size(), // Use padded size to include alignment padding
+            );
+            cursor.read_exact(data_slice)?;
+        }
+
+        Ok(alloc)
+    }
 }
 
 impl Clone for ResizableAlloc {

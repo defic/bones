@@ -1406,6 +1406,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "atomicell",
+ "bincode",
  "bitset-core",
  "bones_ecs_macros",
  "bones_schema",

@@ -59,10 +59,10 @@ impl Default for Entity {
 #[derive(Clone, HasSchema)]
 pub struct Entities {
     /// Bitset containing all living entities
-    alive: BitSetVec,
+    pub alive: BitSetVec,
     generation: Vec<u32>,
     killed: Vec<Entity>,
-    next_id: usize,
+    pub next_id: usize,
     /// helps to know if we should directly append after next_id or if we should look through the
     /// bitset.
     has_deleted: bool,

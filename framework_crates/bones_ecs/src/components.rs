@@ -32,6 +32,23 @@ pub struct ComponentStores {
 unsafe impl Sync for ComponentStores {}
 unsafe impl Send for ComponentStores {}
 
+impl ComponentStores {
+    pub fn serialize_store<T: HasSchema>(&mut self) -> Option<Vec<u8>> {
+        let Some(store) = self.components.get(&T::schema().id()) else {
+            return None;
+        };
+        Some(store.borrow().serialize())
+    }
+
+    pub fn insert<T: HasSchema>(&mut self, store: ComponentStore<T>) {
+        let schema_id = T::schema().id();
+        let new_untyped_store = store.into_untyped();
+
+        self.components.insert(schema_id, |_| {
+            Arc::new(AtomicCell::new(new_untyped_store.clone()))
+        });
+    }
+}
 impl Clone for ComponentStores {
     fn clone(&self) -> Self {
         Self {

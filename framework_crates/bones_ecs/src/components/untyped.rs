@@ -3,6 +3,7 @@ use crate::prelude::*;
 use bones_schema::alloc::ResizableAlloc;
 use std::{
     ffi::c_void,
+    io::Read,
     mem::MaybeUninit,
     ptr::{self},
     rc::Rc,
@@ -20,6 +21,63 @@ pub struct UntypedComponentStore {
 
 unsafe impl Sync for UntypedComponentStore {}
 unsafe impl Send for UntypedComponentStore {}
+
+impl UntypedComponentStore {
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        // Serialize max_id
+        bytes.extend_from_slice(&self.max_id.to_le_bytes());
+
+        // Serialize bitset
+        let bitset_bytes = bincode::serialize(&self.bitset).expect("Failed to serialize bitset");
+        bytes.extend_from_slice(&(bitset_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&bitset_bytes);
+
+        // Serialize storage (ResizableAlloc)
+        let storage_bytes = self.storage.serialize();
+        bytes.extend_from_slice(&(storage_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&storage_bytes);
+
+        bytes
+    }
+
+    pub fn deserialize(
+        bytes: &[u8],
+        schema: &'static Schema,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut cursor = std::io::Cursor::new(bytes);
+
+        // Deserialize max_id
+        let mut max_id_bytes = [0u8; std::mem::size_of::<usize>()];
+        cursor.read_exact(&mut max_id_bytes)?;
+        let max_id = usize::from_le_bytes(max_id_bytes);
+
+        // Deserialize bitset
+        let mut bitset_len_bytes = [0u8; std::mem::size_of::<u64>()];
+        cursor.read_exact(&mut bitset_len_bytes)?;
+        let bitset_len = u64::from_le_bytes(bitset_len_bytes) as usize;
+
+        let mut bitset_bytes = vec![0u8; bitset_len];
+        cursor.read_exact(&mut bitset_bytes)?;
+        let bitset: BitSetVec = bincode::deserialize(&bitset_bytes)?;
+
+        // Deserialize storage (ResizableAlloc)
+        let mut storage_len_bytes = [0u8; std::mem::size_of::<u64>()];
+        cursor.read_exact(&mut storage_len_bytes)?;
+        let storage_len = u64::from_le_bytes(storage_len_bytes) as usize;
+        let mut storage_bytes = vec![0u8; storage_len];
+        cursor.read_exact(&mut storage_bytes)?;
+        let storage = ResizableAlloc::deserialize(&storage_bytes, schema)?;
+
+        Ok(Self {
+            bitset,
+            storage,
+            max_id,
+            schema,
+        })
+    }
+}
 
 impl Clone for UntypedComponentStore {
     fn clone(&self) -> Self {
