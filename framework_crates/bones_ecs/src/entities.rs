@@ -59,10 +59,10 @@ impl Default for Entity {
 #[derive(Clone, HasSchema)]
 pub struct Entities {
     /// Bitset containing all living entities
-    pub alive: BitSetVec,
+    alive: BitSetVec,
     generation: Vec<u32>,
     killed: Vec<Entity>,
-    pub next_id: usize,
+    next_id: usize,
     /// helps to know if we should directly append after next_id or if we should look through the
     /// bitset.
     has_deleted: bool,
@@ -454,15 +454,12 @@ impl Entities {
             self.alive.bit_set(i);
             Entity::new(i as u32, self.generation[i])
         } else {
-            let mut section = 0;
-            // Find section where at least one bit isn't set
-            while self.alive[section].bit_all() {
-                section += 1;
+            let mut i = self.alive.first_free(0) as usize;
+
+            while self.killed.iter().any(|e| e.index() == i as u32) {
+                i = self.alive.first_free(i as u32 + 1) as usize;
             }
-            let mut i = section * (32 * 8);
-            while self.alive.bit_test(i) || self.killed.iter().any(|e| e.index() == i as u32) {
-                i += 1;
-            }
+
             self.alive.bit_set(i);
             if i >= self.next_id {
                 self.next_id = i + 1;
