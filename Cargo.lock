@@ -1400,6 +1400,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "atomicell",
+ "bincode",
  "bitset-core",
  "bones_ecs_macros",
  "bones_schema",
@@ -1408,6 +1409,7 @@ dependencies = [
  "once_map",
  "paste",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

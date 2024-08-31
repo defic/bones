@@ -55,7 +55,6 @@ impl Default for Entity {
 ///
 /// It also holds a list of entities that were recently killed, which allows to remove components of
 /// deleted entities at the end of a game frame.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, HasSchema)]
 pub struct Entities {
     /// Bitset containing all living entities
@@ -81,6 +80,68 @@ impl Default for Entities {
             killed: vec![],
             next_id: 0,
             has_deleted: false,
+        }
+    }
+}
+
+// Serde implementation wrapped in a cfg attribute
+#[cfg(feature = "serde")]
+mod serde_impl {
+    use super::*;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct CompactEntities {
+        alive: BitSetVec,
+        generations: Vec<(usize, u32)>,
+        killed: Vec<Entity>,
+        next_id: usize,
+        has_deleted: bool,
+    }
+
+    impl Serialize for Entities {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            // Create a compact representation
+            let compact = CompactEntities {
+                alive: self.alive.clone(),
+                generations: self
+                    .generation
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &gen)| gen != 0)
+                    .map(|(idx, &gen)| (idx, gen))
+                    .collect(),
+                killed: self.killed.clone(),
+                next_id: self.next_id,
+                has_deleted: self.has_deleted,
+            };
+
+            compact.serialize(serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Entities {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let compact = CompactEntities::deserialize(deserializer)?;
+
+            let mut generation = vec![0u32; BITSET_SIZE];
+            for (idx, gen) in compact.generations {
+                generation[idx] = gen;
+            }
+
+            Ok(Entities {
+                alive: compact.alive,
+                generation,
+                killed: compact.killed,
+                next_id: compact.next_id,
+                has_deleted: compact.has_deleted,
+            })
         }
     }
 }
@@ -711,5 +772,54 @@ mod tests {
         // Join with an empty bitset
         let bitset = BitSetVec::default();
         assert_eq!(entities.iter_with_bitset(&bitset).count(), 0);
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+    use serde_json;
+    use std::mem;
+
+    #[test]
+    fn test_entities_serialization_deserialization() {
+        let mut entities = Entities::default();
+
+        // Create some entities
+        for _ in 0..10 {
+            entities.create();
+        }
+
+        // Kill some entities
+        entities.kill(Entity(2, 0));
+        entities.kill(Entity(5, 0));
+
+        // Serialize
+        let serialized = serde_json::to_string(&entities).unwrap();
+
+        // Deserialize
+        let deserialized: Entities = serde_json::from_str(&serialized).unwrap();
+
+        // Check if deserialized matches original
+        assert_eq!(entities.generation, deserialized.generation);
+        assert_eq!(entities.killed, deserialized.killed);
+        assert_eq!(entities.next_id, deserialized.next_id);
+        assert_eq!(entities.has_deleted, deserialized.has_deleted);
+
+        println!("Serialized size: {} bytes", serialized.len());
+        println!("Original size: {} bytes", mem::size_of_val(&entities));
+    }
+
+    #[test]
+    fn serialize() {
+        let mut entities = Entities::default();
+
+        // Create a couple entities
+        entities.create();
+        entities.create();
+
+        let bytes = bincode::serialize(&entities).unwrap();
+        println!("Size of entities: {}", bytes.len());
+        let entities: Entities = bincode::deserialize(&bytes).unwrap();
     }
 }

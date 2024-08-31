@@ -11,7 +11,7 @@ categories.workspace    = true
 keywords.workspace      = true
 
 [features]
-default = ["derive", "keysize16"]
+default = ["derive", "keysize16", "serde"]
 derive  = ["dep:bones_ecs_macros"]
 glam    = ["dep:glam", "dep:paste", "bones_schema/glam"]
 serde   = ["dep:serde"]
@@ -39,3 +39,5 @@ once_map    = "0.4.12"
 
 [dev-dependencies]
 glam = "0.24"
+bincode = "1"
+serde_json = "1"
