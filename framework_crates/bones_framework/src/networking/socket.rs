@@ -3,7 +3,7 @@
 
 use bones_matchmaker_proto::PLAY_ALPN;
 use bytes::Bytes;
-use iroh_net::NodeAddr;
+use iroh::NodeAddr;
 use tracing::{info, warn};
 
 use crate::networking::get_network_endpoint;
@@ -13,8 +13,7 @@ use super::{GameMessage, NetworkSocket, SocketTarget, RUNTIME};
 /// The [`NetworkSocket`] implementation.
 #[derive(Debug, Clone)]
 pub struct Socket {
-    ///
-    pub connections: Vec<(u32, iroh_quinn::Connection)>,
+    pub connections: Vec<(u32, iroh::endpoint::Connection)>,
     pub ggrs_receiver: async_channel::Receiver<(u32, GameMessage)>,
     pub reliable_receiver: async_channel::Receiver<(u32, Vec<u8>)>,
     pub player_idx: u32,
@@ -24,7 +23,7 @@ pub struct Socket {
 }
 
 impl Socket {
-    pub fn new(player_idx: u32, connections: Vec<(u32, iroh_quinn::Connection)>) -> Self {
+    pub fn new(player_idx: u32, connections: Vec<(u32, iroh::endpoint::Connection)>) -> Self {
         let (ggrs_sender, ggrs_receiver) = async_channel::unbounded();
         let (reliable_sender, reliable_receiver) = async_channel::unbounded();
 
@@ -130,7 +129,7 @@ impl Socket {
         }
     }
 
-    fn get_connection(&self, idx: u32) -> &iroh_quinn::Connection {
+    fn get_connection(&self, idx: u32) -> &iroh::endpoint::Connection {
         debug_assert!(idx < self.player_count);
         // TODO: if this is too slow, optimize storage
         self.connections
@@ -153,7 +152,8 @@ impl NetworkSocket for Socket {
                     let result = async move {
                         let mut stream = conn.open_uni().await?;
                         stream.write_chunk(message).await?;
-                        stream.finish().await?;
+                        stream.finish()?;
+                        stream.stopped().await?;
                         anyhow::Ok(())
                     };
                     if let Err(err) = result.await {
@@ -169,7 +169,8 @@ impl NetworkSocket for Socket {
                         let result = async move {
                             let mut stream = conn.open_uni().await?;
                             stream.write_chunk(message).await?;
-                            stream.finish().await?;
+                            stream.finish()?;
+                            stream.stopped().await?;
                             anyhow::Ok(())
                         };
                         if let Err(err) = result.await {
@@ -216,8 +217,8 @@ pub(super) async fn establish_peer_connections(
     player_idx: u32,
     player_count: u32,
     peer_addrs: Vec<(u32, NodeAddr)>,
-    conn: Option<iroh_quinn::Connection>,
-) -> anyhow::Result<Vec<(u32, iroh_quinn::Connection)>> {
+    conn: Option<iroh::endpoint::Connection>,
+) -> anyhow::Result<Vec<(u32, iroh::endpoint::Connection)>> {
     let mut peer_connections = Vec::new();
     let had_og_conn = conn.is_some();
     if let Some(conn) = conn {
@@ -234,18 +235,19 @@ pub(super) async fn establish_peer_connections(
     info!(players=?range, "Waiting for {} peer connections", range.len());
     for i in range {
         // Wait for connection
-        let mut conn = ep
+        let conn = ep
             .accept()
             .await
             .ok_or_else(|| anyhow::anyhow!("no connection for {}", i))?;
-        let alpn = conn.alpn().await?;
+        let mut connecting = conn.accept()?;
+        let alpn = connecting.alpn().await?;
         anyhow::ensure!(
             alpn == PLAY_ALPN,
             "invalid ALPN: {:?}",
             std::str::from_utf8(&alpn).unwrap_or("<bytes>")
         );
 
-        let conn = conn.await?;
+        let conn = connecting.await?;
 
         // Receive the player index
         let idx = {
@@ -272,7 +274,8 @@ pub(super) async fn establish_peer_connections(
         // Send player index
         let mut channel = conn.open_uni().await?;
         channel.write(&player_idx.to_le_bytes()).await?;
-        channel.finish().await?;
+        channel.finish()?;
+        channel.stopped().await?;
 
         out_connections.push((i, conn));
     }

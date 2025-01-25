@@ -1,9 +1,11 @@
-use std::time::Duration;
-
 use bones_matchmaker_proto::{
-    MatchInfo, MatchmakerRequest, MatchmakerResponse, MATCH_ALPN, PLAY_ALPN,
+    MatchInfo, MatchmakerRequest, MatchmakerResponse, PlayerIdxAssignment, MATCH_ALPN, PLAY_ALPN,
 };
 use serde::{Deserialize, Serialize};
+use std::{
+    net::{Ipv4Addr, SocketAddrV4},
+    time::Duration,
+};
 use tokio::task::JoinSet;
 
 const CLIENT_PORT: u16 = 0;
@@ -21,27 +23,33 @@ async fn main() {
 }
 
 async fn client() -> anyhow::Result<()> {
-    let secret_key = iroh_net::key::SecretKey::generate();
-    let endpoint = iroh_net::Endpoint::builder()
+    let secret_key = iroh::key::SecretKey::generate();
+    let endpoint = iroh::Endpoint::builder()
         .alpns(vec![MATCH_ALPN.to_vec(), PLAY_ALPN.to_vec()])
         .discovery(Box::new(
-            iroh_net::discovery::ConcurrentDiscovery::from_services(vec![
-                Box::new(iroh_net::discovery::dns::DnsDiscovery::n0_dns()),
-                Box::new(iroh_net::discovery::pkarr::PkarrPublisher::n0_dns(
+            iroh::discovery::ConcurrentDiscovery::from_services(vec![
+                Box::new(
+                    iroh::discovery::local_swarm_discovery::LocalSwarmDiscovery::new(
+                        secret_key.public(),
+                    )?,
+                ),
+                Box::new(iroh::discovery::dns::DnsDiscovery::n0_dns()),
+                Box::new(iroh::discovery::pkarr::PkarrPublisher::n0_dns(
                     secret_key.clone(),
                 )),
             ]),
         ))
         .secret_key(secret_key)
-        .bind(CLIENT_PORT)
+        .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, CLIENT_PORT))
+        .bind()
         .await?;
 
     let i_am = std::env::args().nth(2).unwrap();
     let hello = Hello { i_am };
     println!("o  Opened client ID: {}. {hello:?}", endpoint.node_id());
 
-    let server_id: iroh_net::NodeId = std::env::args().nth(3).expect("missing node id").parse()?;
-    let server_addr = iroh_net::NodeAddr::new(server_id);
+    let server_id: iroh::NodeId = std::env::args().nth(3).expect("missing node id").parse()?;
+    let server_addr = iroh::NodeAddr::new(server_id);
 
     // Connect to the server
     let conn = endpoint.connect(server_addr, MATCH_ALPN).await?;
@@ -49,18 +57,21 @@ async fn client() -> anyhow::Result<()> {
     // Send a match request to the server
     let (mut send, mut recv) = conn.open_bi().await?;
 
-    let message = MatchmakerRequest::RequestMatch(MatchInfo {
-        client_count: std::env::args()
+    let message = MatchmakerRequest::RequestMatchmaking(MatchInfo {
+        max_players: std::env::args()
             .nth(1)
             .map(|x| x.parse().unwrap())
-            .unwrap_or(0),
+            .unwrap_or(2),
+        game_id: String::from("example-game"),
         match_data: b"example-client".to_vec(),
+        player_idx_assignment: PlayerIdxAssignment::Ordered,
     });
     println!("=> Sending match request: {message:?}");
     let message = postcard::to_allocvec(&message)?;
 
     send.write_all(&message).await?;
-    send.finish().await?;
+    send.finish()?;
+    send.stopped().await?;
 
     println!("o  Waiting for response");
 
@@ -73,23 +84,23 @@ async fn client() -> anyhow::Result<()> {
         panic!("<= Unexpected message from server!");
     }
 
-    let (player_idx, player_ids, _client_count) = loop {
+    let (player_idx, player_ids, _player_count) = loop {
         let mut recv = conn.accept_uni().await?;
         let message = recv.read_to_end(256).await?;
         let message: MatchmakerResponse = postcard::from_bytes(&message)?;
 
         match message {
-            MatchmakerResponse::ClientCount(count) => {
-                println!("<= {count} players in lobby");
+            MatchmakerResponse::MatchmakingUpdate { player_count } => {
+                println!("<= {player_count} players in lobby");
             }
             MatchmakerResponse::Success {
                 random_seed,
                 player_idx,
-                client_count,
+                player_count,
                 player_ids,
             } => {
-                println!("<= Match is ready! Random seed: {random_seed}. Player IDX: {player_idx}. Client count: {client_count}");
-                break (player_idx, player_ids, client_count as usize);
+                println!("<= Match is ready! Random seed: {random_seed}. Player IDX: {player_idx}. Client count: {player_count}");
+                break (player_idx, player_ids, player_count);
             }
             _ => panic!("<= Unexpected message from server"),
         }
@@ -115,7 +126,8 @@ async fn client() -> anyhow::Result<()> {
                         sender
                             .write_all(&postcard::to_allocvec(&hello.clone())?)
                             .await?;
-                        sender.finish().await?;
+                        sender.finish()?;
+                        sender.stopped().await?;
 
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
@@ -132,13 +144,14 @@ async fn client() -> anyhow::Result<()> {
 
             let endpoint = endpoint.clone();
             tasks.spawn(async move {
-                if let Some(mut conn) = endpoint.accept().await {
+                if let Some(incomming) = endpoint.accept().await {
                     let result = async {
-                        let alpn = conn.alpn().await?;
+                        let mut connecting = incomming.accept()?;
+                        let alpn = connecting.alpn().await?;
                         if alpn != PLAY_ALPN {
                             anyhow::bail!("unexpected ALPN: {:?}", alpn);
                         }
-                        let conn = conn.await?;
+                        let conn = connecting.await?;
 
                         for _ in 0..3 {
                             let mut recv = conn.accept_uni().await?;
@@ -165,7 +178,7 @@ async fn client() -> anyhow::Result<()> {
     }
 
     // Shutdown the endpoint
-    endpoint.close(0u8.into(), b"done").await?;
+    endpoint.close().await?;
 
     Ok(())
 }

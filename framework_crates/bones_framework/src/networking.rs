@@ -1,19 +1,18 @@
 #![doc = include_str!("./networking.md")]
 
-use std::{fmt::Debug, marker::PhantomData, sync::Arc};
-
-use bones_matchmaker_proto::{MATCH_ALPN, PLAY_ALPN};
-use ggrs::P2PSession;
-use instant::Duration;
-use once_cell::sync::Lazy;
-use tracing::{debug, error, info, trace, warn};
-
-use crate::prelude::*;
-
 use self::{
     input::{DenseInput, NetworkInputConfig, NetworkPlayerControl, NetworkPlayerControls},
     socket::Socket,
 };
+use crate::networking::online::OnlineMatchmakerResponse;
+pub use crate::networking::random::RngGenerator;
+use crate::prelude::*;
+use bones_matchmaker_proto::{MATCH_ALPN, PLAY_ALPN};
+use ggrs::P2PSession;
+use instant::Duration;
+use once_cell::sync::Lazy;
+use std::{fmt::Debug, marker::PhantomData, sync::Arc};
+use tracing::{debug, error, info, trace, warn};
 
 #[cfg(feature = "net-debug")]
 use {
@@ -26,7 +25,10 @@ use crate::input::PlayerControls as PlayerControlsTrait;
 pub mod input;
 pub mod lan;
 pub mod online;
+pub mod online_lobby;
+pub mod online_matchmaking;
 pub mod proto;
+pub mod random;
 pub mod socket;
 
 #[cfg(feature = "net-debug")]
@@ -59,7 +61,9 @@ impl From<ggrs::InputStatus> for NetworkInputStatus {
 
 /// Module prelude.
 pub mod prelude {
-    pub use super::{input, lan, online, proto, DisconnectedPlayers, NetworkInfo, RUNTIME};
+    pub use super::{
+        input, lan, online, proto, random, DisconnectedPlayers, RngGenerator, SyncingInfo, RUNTIME,
+    };
 
     #[cfg(feature = "net-debug")]
     pub use super::debug::prelude::*;
@@ -73,6 +77,9 @@ pub mod prelude {
 /// Note that FPS is provided as an integer to ggrs, so network modified fps is rounded to nearest int,
 /// which is then used to compute timestep so ggrs and networking match.
 pub const NETWORK_FRAME_RATE_FACTOR: f32 = 0.9;
+
+/// Default frame rate to run at if user provides none
+pub const NETWORK_DEFAULT_SIMULATION_FRAME_RATE: f32 = 60.0;
 
 /// Number of frames client may predict beyond confirmed frame before freezing and waiting
 /// for inputs from other players. Default value if not specified in [`GgrsSessionRunnerInfo`].
@@ -103,26 +110,31 @@ impl<T: DenseInput + Debug> ggrs::Config for GgrsConfig<T> {
 }
 
 /// The network endpoint used for all network communications.
-static NETWORK_ENDPOINT: tokio::sync::OnceCell<iroh_net::Endpoint> =
-    tokio::sync::OnceCell::const_new();
+static NETWORK_ENDPOINT: tokio::sync::OnceCell<iroh::Endpoint> = tokio::sync::OnceCell::const_new();
 
 /// Get the network endpoint used for all communications.
-pub async fn get_network_endpoint() -> &'static iroh_net::Endpoint {
+pub async fn get_network_endpoint() -> &'static iroh::Endpoint {
     NETWORK_ENDPOINT
         .get_or_init(|| async move {
-            let secret_key = iroh_net::key::SecretKey::generate();
-            iroh_net::Endpoint::builder()
+            let secret_key = iroh::key::SecretKey::generate();
+            iroh::Endpoint::builder()
                 .alpns(vec![MATCH_ALPN.to_vec(), PLAY_ALPN.to_vec()])
                 .discovery(Box::new(
-                    iroh_net::discovery::ConcurrentDiscovery::from_services(vec![
-                        Box::new(iroh_net::discovery::dns::DnsDiscovery::n0_dns()),
-                        Box::new(iroh_net::discovery::pkarr::PkarrPublisher::n0_dns(
+                    iroh::discovery::ConcurrentDiscovery::from_services(vec![
+                        Box::new(
+                            iroh::discovery::local_swarm_discovery::LocalSwarmDiscovery::new(
+                                secret_key.public(),
+                            )
+                            .unwrap(),
+                        ),
+                        Box::new(iroh::discovery::dns::DnsDiscovery::n0_dns()),
+                        Box::new(iroh::discovery::pkarr::PkarrPublisher::n0_dns(
                             secret_key.clone(),
                         )),
                     ]),
                 ))
                 .secret_key(secret_key)
-                .bind(0)
+                .bind()
                 .await
                 .unwrap()
         })
@@ -139,7 +151,7 @@ pub struct NetworkMatchSocket(Arc<dyn NetworkSocket>);
 
 /// Wraps [`ggrs::Message`] with included `match_id`, used to determine if message received
 /// from current match.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameMessage {
     /// Socket match id
     pub match_id: u8,
@@ -183,19 +195,303 @@ pub enum SocketTarget {
     All,
 }
 
-/// Resource updated each frame exposing current frame and last confirmed of online session.
+/// Resource updated each frame exposing syncing/networking information in the current session.
 #[derive(HasSchema, Clone)]
 #[schema(no_default)]
-pub struct NetworkInfo {
-    /// Current frame of simulation step
-    pub current_frame: i32,
+pub enum SyncingInfo {
+    /// Holds data for an online session
+    Online {
+        /// Current frame of simulation step
+        current_frame: i32,
+        /// Last confirmed frame by all clients.
+        /// Anything that occurred on this frame is agreed upon by all clients.
+        last_confirmed_frame: i32,
+        /// Socket
+        socket: Socket,
+        /// Networking stats for each connected player, stored at the \[player_idx\] index for each respective player.
+        players_network_stats: SVec<PlayerNetworkStats>,
+        /// The local player's index
+        local_player_idx: usize,
+        /// The local input delay set for this session
+        local_frame_delay: usize,
+        /// List of disconnected players (their idx)
+        disconnected_players: SVec<usize>,
+        /// The random seed for this session
+        random_seed: u64,
+    },
+    /// Holds data for an offline session
+    Offline {
+        /// Current frame of simulation step
+        current_frame: i32,
+        /// The random seed for this session
+        random_seed: u64,
+    },
+}
 
-    /// Last confirmed frame by all clients.
-    /// Anything that occurred on this frame is agreed upon by all clients.
-    pub last_confirmed_frame: i32,
+impl SyncingInfo {
+    /// Checks if the session is online.
+    pub fn is_online(&self) -> bool {
+        matches!(self, SyncingInfo::Online { .. })
+    }
 
-    /// Socket
-    pub socket: Socket,
+    /// Checks if the session is offline.
+    pub fn is_offline(&self) -> bool {
+        matches!(self, SyncingInfo::Offline { .. })
+    }
+
+    /// Getter for the current frame (number).
+    pub fn current_frame(&self) -> i32 {
+        match self {
+            SyncingInfo::Online { current_frame, .. } => *current_frame,
+            SyncingInfo::Offline { current_frame, .. } => *current_frame,
+        }
+    }
+
+    /// Getter for the last confirmed frame (number).
+    pub fn last_confirmed_frame(&self) -> i32 {
+        match self {
+            SyncingInfo::Online {
+                last_confirmed_frame,
+                ..
+            } => *last_confirmed_frame,
+            SyncingInfo::Offline { current_frame, .. } => *current_frame,
+        }
+    }
+    /// Getter for socket.
+    pub fn socket(&self) -> Option<&Socket> {
+        match self {
+            SyncingInfo::Online { socket, .. } => Some(socket),
+            SyncingInfo::Offline { .. } => None,
+        }
+    }
+
+    /// Mutable getter for socket.
+    pub fn socket_mut(&mut self) -> Option<&mut Socket> {
+        match self {
+            SyncingInfo::Online { socket, .. } => Some(socket),
+            SyncingInfo::Offline { .. } => None,
+        }
+    }
+
+    /// Getter for a single player's network stats using their player_idx
+    pub fn player_network_stats(&self, player_idx: usize) -> Option<PlayerNetworkStats> {
+        match self {
+            SyncingInfo::Online {
+                players_network_stats,
+                ..
+            } => players_network_stats.get(player_idx).cloned(),
+            SyncingInfo::Offline { .. } => None,
+        }
+    }
+
+    /// Getter for all players' network stats, including local player (set to default). This maintains index == player_idx.
+    pub fn players_network_stats(&self) -> SVec<PlayerNetworkStats> {
+        match self {
+            SyncingInfo::Online {
+                players_network_stats,
+                ..
+            } => players_network_stats.clone(),
+            SyncingInfo::Offline { .. } => SVec::new(),
+        }
+    }
+
+    /// Getter for remote player network stats (filtering out local player). This does not maintain index == player_idx.
+    pub fn remote_players_network_stats(&self) -> SVec<PlayerNetworkStats> {
+        match self {
+            SyncingInfo::Online {
+                players_network_stats,
+                ..
+            } => players_network_stats
+                .iter()
+                .filter(|&stats| stats.ping != 0 || stats.kbps_sent != 0)
+                .cloned()
+                .collect(),
+            SyncingInfo::Offline { .. } => SVec::new(),
+        }
+    }
+
+    /// Calculates the total kilobits per second sent across all remote players.
+    pub fn total_kbps_sent(&self) -> usize {
+        self.remote_players_network_stats()
+            .iter()
+            .map(|stats| stats.kbps_sent)
+            .sum()
+    }
+
+    /// Calculates the average kilobits per second sent across all remote players.
+    pub fn averaged_kbps_sent(&self) -> f32 {
+        let remote_stats = self.remote_players_network_stats();
+        if remote_stats.is_empty() {
+            0.0
+        } else {
+            let total_kbps: usize = remote_stats.iter().map(|stats| stats.kbps_sent).sum();
+            total_kbps as f32 / remote_stats.len() as f32
+        }
+    }
+
+    /// Returns the highest number of local frames behind across all remote players.
+    pub fn highest_local_frames_behind(&self) -> i32 {
+        self.remote_players_network_stats()
+            .iter()
+            .map(|stats| stats.local_frames_behind)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Returns the highest number of remote frames behind across all remote players.
+    pub fn highest_remote_frames_behind(&self) -> i32 {
+        self.remote_players_network_stats()
+            .iter()
+            .map(|stats| stats.remote_frames_behind)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Calculates the average ping across all remote players.
+    pub fn averaged_ping(&self) -> u128 {
+        let remote_stats = self.remote_players_network_stats();
+        if remote_stats.is_empty() {
+            0
+        } else {
+            let total_ping: u128 = remote_stats.iter().map(|stats| stats.ping).sum();
+            total_ping / remote_stats.len() as u128
+        }
+    }
+
+    /// Returns the lowest ping across all remote players.
+    pub fn lowest_ping(&self) -> u128 {
+        self.remote_players_network_stats()
+            .iter()
+            .map(|stats| stats.ping)
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Returns the highest ping across all remote players.
+    pub fn highest_ping(&self) -> u128 {
+        self.remote_players_network_stats()
+            .iter()
+            .map(|stats| stats.ping)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Getter for the local player index, if offline defaults to None.
+    pub fn local_player_idx_checked(&self) -> Option<usize> {
+        match self {
+            SyncingInfo::Online {
+                local_player_idx, ..
+            } => Some(*local_player_idx),
+            SyncingInfo::Offline { .. } => None,
+        }
+    }
+
+    /// Getter for the local player index, if offline defaults to 0.
+    pub fn local_player_idx(&self) -> usize {
+        match self {
+            SyncingInfo::Online {
+                local_player_idx, ..
+            } => *local_player_idx,
+            SyncingInfo::Offline { .. } => 0,
+        }
+    }
+
+    /// Getter for the local frame delay.
+    pub fn local_frame_delay(&self) -> usize {
+        match self {
+            SyncingInfo::Online {
+                local_frame_delay, ..
+            } => *local_frame_delay,
+            SyncingInfo::Offline { .. } => 0,
+        }
+    }
+
+    /// Getter for the number of players, if offline defaults to 0.
+    pub fn players_count(&self) -> usize {
+        match self {
+            SyncingInfo::Online {
+                players_network_stats,
+                ..
+            } => players_network_stats.len(),
+            SyncingInfo::Offline { .. } => 0,
+        }
+    }
+
+    /// Getter for the number of players, if offline defaults to None.
+    pub fn players_count_checked(&self) -> Option<usize> {
+        match self {
+            SyncingInfo::Online {
+                players_network_stats,
+                ..
+            } => Some(players_network_stats.len()),
+            SyncingInfo::Offline { .. } => None,
+        }
+    }
+
+    /// Getter for the list of active players (idx) which are connected. Offline returns empty list.
+    pub fn active_players(&self) -> SVec<usize> {
+        match self {
+            SyncingInfo::Online {
+                players_network_stats,
+                disconnected_players,
+                ..
+            } => {
+                let total_players = players_network_stats.len();
+                (0..total_players)
+                    .filter(|&id| !disconnected_players.contains(&id))
+                    .collect()
+            }
+            SyncingInfo::Offline { .. } => SVec::new(),
+        }
+    }
+
+    /// Getter for the list of active players (idx) which are connected. Offline returns None.
+    pub fn active_players_checked(&self) -> Option<SVec<usize>> {
+        match self {
+            SyncingInfo::Online {
+                players_network_stats,
+                disconnected_players,
+                ..
+            } => {
+                let total_players = players_network_stats.len();
+                let active = (0..total_players)
+                    .filter(|&id| !disconnected_players.contains(&id))
+                    .collect();
+                Some(active)
+            }
+            SyncingInfo::Offline { .. } => None,
+        }
+    }
+
+    /// Getter for the list of players which have been disconnected (their idx). Offline returns empty list.
+    pub fn disconnected_players(&self) -> SVec<usize> {
+        match self {
+            SyncingInfo::Online {
+                disconnected_players,
+                ..
+            } => disconnected_players.clone(),
+            SyncingInfo::Offline { .. } => SVec::new(),
+        }
+    }
+
+    /// Getter for the list of players which have been disconnected (their idx). Offline returns None.
+    pub fn disconnected_players_checked(&self) -> Option<SVec<usize>> {
+        match self {
+            SyncingInfo::Online {
+                disconnected_players,
+                ..
+            } => Some(disconnected_players.clone()),
+            SyncingInfo::Offline { .. } => None,
+        }
+    }
+
+    /// Getter for the random seed.
+    pub fn random_seed(&self) -> u64 {
+        match self {
+            SyncingInfo::Online { random_seed, .. } => *random_seed,
+            SyncingInfo::Offline { random_seed, .. } => *random_seed,
+        }
+    }
 }
 
 /// Resource tracking which players have been disconnected.
@@ -250,6 +546,9 @@ pub struct GgrsSessionRunner<'a, InputTypes: NetworkInputConfig<'a>> {
 
     /// Local input delay ggrs session was initialized with
     local_input_delay: usize,
+
+    /// The random seed used for this session
+    pub random_seed: u64,
 }
 
 /// The info required to create a [`GgrsSessionRunner`].
@@ -272,6 +571,8 @@ pub struct GgrsSessionRunnerInfo {
     ///
     /// `None` will use Bone's default.
     pub local_input_delay: Option<usize>,
+    /// The random seed used for this session
+    pub random_seed: u64,
 }
 
 impl GgrsSessionRunnerInfo {
@@ -280,6 +581,7 @@ impl GgrsSessionRunnerInfo {
         socket: Socket,
         max_prediction_window: Option<usize>,
         local_input_delay: Option<usize>,
+        random_seed: u64,
     ) -> Self {
         let player_idx = socket.player_idx();
         let player_count = socket.player_count();
@@ -289,6 +591,7 @@ impl GgrsSessionRunnerInfo {
             player_count,
             max_prediction_window,
             local_input_delay,
+            random_seed,
         }
     }
 }
@@ -297,17 +600,49 @@ impl<'a, InputTypes> GgrsSessionRunner<'a, InputTypes>
 where
     InputTypes: NetworkInputConfig<'a>,
 {
-    /// Create a new sessino runner.
-    pub fn new(simulation_fps: f32, info: GgrsSessionRunnerInfo) -> Self
+    /// Creates a new session runner from a `OnlineMatchmakerResponse::GameStarting`
+    /// Any input values set as `None` will be set to default.
+    /// If response is not `GameStarting` returns None.
+    pub fn new_networked_game_starting(
+        target_fps: Option<f32>,
+        max_prediction_window: Option<usize>,
+        local_input_delay: Option<usize>,
+        matchmaker_resp_game_starting: OnlineMatchmakerResponse,
+    ) -> Option<Self> {
+        if let OnlineMatchmakerResponse::GameStarting {
+            socket,
+            player_idx: _,
+            player_count: _,
+            random_seed,
+        } = matchmaker_resp_game_starting
+        {
+            Some(Self::new(
+                target_fps,
+                GgrsSessionRunnerInfo::new(
+                    socket.ggrs_socket(),
+                    max_prediction_window,
+                    local_input_delay,
+                    random_seed,
+                ),
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Creates a new session runner from scratch.
+    pub fn new(target_fps: Option<f32>, info: GgrsSessionRunnerInfo) -> Self
     where
         Self: Sized,
     {
+        let simulation_fps = target_fps.unwrap_or(NETWORK_DEFAULT_SIMULATION_FRAME_RATE);
+
         // Modified FPS may not be an integer, but ggrs requires integer fps, so we clamp and round
         // to integer so our computed timestep will match  that of ggrs.
         let network_fps = (simulation_fps * NETWORK_FRAME_RATE_FACTOR) as f64;
         let network_fps = network_fps
-            .max(std::usize::MIN as f64)
-            .min(std::usize::MAX as f64)
+            .max(usize::MIN as f64)
+            .min(usize::MAX as f64)
             .round() as usize;
 
         // There may be value in dynamically negotitaing these values based on client's pings
@@ -363,6 +698,7 @@ where
             socket: info.socket.clone(),
             local_input_delay,
             local_input_disabled: false,
+            random_seed: info.random_seed,
         }
     }
 }
@@ -556,15 +892,42 @@ where
                                     // Input has been consumed, signal that we are in new input frame
                                     self.input_collector.advance_frame();
 
-                                    // TODO: Make sure NetworkInfo is initialized immediately when session is created,
+                                    // Fetch the PlayerNetworkStats for each remote player, guaranteeing each one is inserted into the index matching its handle
+                                    let mut players_network_stats: Vec<PlayerNetworkStats> = vec![
+                                        PlayerNetworkStats::default();
+                                        self.session.remote_player_handles().len() + 1 // + 1 for the local player to maintain correct length
+                                    ];
+                                    for handle in self.session.remote_player_handles().iter() {
+                                        if let Ok(stats) = self.session.network_stats(*handle) {
+                                            players_network_stats[*handle] =
+                                                PlayerNetworkStats::from_ggrs_network_stats(
+                                                    *handle, stats,
+                                                );
+                                        }
+                                    }
+
+                                    // Create and insert the RngGenerator resource if it doesn't exist
+                                    if world.resources.get::<RngGenerator>().is_none() {
+                                        let rng_generator = RngGenerator::new(self.random_seed);
+                                        world.insert_resource(rng_generator);
+                                    }
+
+                                    // TODO: Make sure SyncingInfo is initialized immediately when session is created,
                                     // even before a frame has advanced.
-                                    //
                                     // The existance of this resource may be used to determine if in an online match, and there could
                                     // be race if expected it to exist but testing before first frame advance.
-                                    world.insert_resource(NetworkInfo {
+                                    world.insert_resource(SyncingInfo::Online {
                                         current_frame: self.session.current_frame(),
                                         last_confirmed_frame: self.session.confirmed_frame(),
                                         socket: self.socket.clone(),
+                                        players_network_stats: players_network_stats.into(),
+                                        local_player_idx: self.local_player_idx as usize,
+                                        local_frame_delay: self.local_input_delay,
+                                        disconnected_players: self
+                                            .disconnected_players
+                                            .clone()
+                                            .into(),
+                                        random_seed: self.random_seed,
                                     });
 
                                     // Disconnected players persisted on session runner, and updated each frame.
@@ -659,11 +1022,50 @@ where
             player_count: self.session.num_players().try_into().unwrap(),
             max_prediction_window: Some(self.session.max_prediction()),
             local_input_delay: Some(self.local_input_delay),
+            random_seed: self.random_seed,
         };
-        *self = GgrsSessionRunner::new(self.original_fps as f32, runner_info);
+        *self = GgrsSessionRunner::new(Some(self.original_fps as f32), runner_info);
     }
 
     fn disable_local_input(&mut self, input_disabled: bool) {
         self.local_input_disabled = input_disabled;
+    }
+}
+
+/// A schema-compatible wrapper for ggrs `NetworkStats` struct contains networking stats.
+#[derive(Debug, Default, Clone, Copy, HasSchema)]
+pub struct PlayerNetworkStats {
+    /// The idx of the player these stats are for. Included here for self-attesting/ease-of-access.
+    pub player_idx: usize,
+    /// The length of the queue containing UDP packets which have not yet been acknowledged by the end client.
+    /// The length of the send queue is a rough indication of the quality of the connection. The longer the send queue, the higher the round-trip time between the
+    /// clients. The send queue will also be longer than usual during high packet loss situations.
+    pub send_queue_len: usize,
+    /// The roundtrip packet transmission time as calculated by GGRS.
+    pub ping: u128,
+    /// The estimated bandwidth used between the two clients, in kilobits per second.
+    pub kbps_sent: usize,
+
+    /// The number of frames GGRS calculates that the local client is behind the remote client at this instant in time.
+    /// For example, if at this instant the current game client is running frame 1002 and the remote game client is running frame 1009,
+    /// this value will mostly likely roughly equal 7.
+    pub local_frames_behind: i32,
+    /// The same as [`local_frames_behind`], but calculated from the perspective of the remote player.
+    ///
+    /// [`local_frames_behind`]: #structfield.local_frames_behind
+    pub remote_frames_behind: i32,
+}
+
+impl PlayerNetworkStats {
+    /// Creates a new PlayerNetworkStats from a player index and a ggrs NetworkStats.
+    pub fn from_ggrs_network_stats(player_idx: usize, stats: ggrs::NetworkStats) -> Self {
+        Self {
+            player_idx,
+            send_queue_len: stats.send_queue_len,
+            ping: stats.ping,
+            kbps_sent: stats.kbps_sent,
+            local_frames_behind: stats.local_frames_behind,
+            remote_frames_behind: stats.remote_frames_behind,
+        }
     }
 }

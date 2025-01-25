@@ -5,14 +5,18 @@
 #[macro_use]
 extern crate tracing;
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::Arc;
 
 use bones_matchmaker_proto::MATCH_ALPN;
-use iroh_net::key::SecretKey;
+use iroh::key::SecretKey;
+use matchmaker::Matchmaker;
 
 pub mod cli;
-
+mod helpers;
+mod lobbies;
 mod matchmaker;
+mod matchmaking;
 
 #[derive(clap::Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -25,7 +29,7 @@ struct Config {
     print_secret_key: bool,
     /// Use this secret key for the node
     #[clap(short, long, env = "BONES_MATCHMAKER_SECRET_KEY")]
-    secret_key: Option<iroh_net::key::SecretKey>,
+    secret_key: Option<iroh::key::SecretKey>,
 }
 
 async fn server(args: Config) -> anyhow::Result<()> {
@@ -46,18 +50,24 @@ async fn server(args: Config) -> anyhow::Result<()> {
         println!("Secret Key: {}", secret_key);
     }
 
-    let endpoint = iroh_net::Endpoint::builder()
+    let endpoint = iroh::Endpoint::builder()
         .alpns(vec![MATCH_ALPN.to_vec()])
         .discovery(Box::new(
-            iroh_net::discovery::ConcurrentDiscovery::from_services(vec![
-                Box::new(iroh_net::discovery::dns::DnsDiscovery::n0_dns()),
-                Box::new(iroh_net::discovery::pkarr::PkarrPublisher::n0_dns(
+            iroh::discovery::ConcurrentDiscovery::from_services(vec![
+                Box::new(
+                    iroh::discovery::local_swarm_discovery::LocalSwarmDiscovery::new(
+                        secret_key.public(),
+                    )?,
+                ),
+                Box::new(iroh::discovery::dns::DnsDiscovery::n0_dns()),
+                Box::new(iroh::discovery::pkarr::PkarrPublisher::n0_dns(
                     secret_key.clone(),
                 )),
             ]),
         ))
         .secret_key(secret_key)
-        .bind(port)
+        .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
+        .bind()
         .await?;
 
     let my_addr = endpoint.node_addr().await?;
@@ -66,23 +76,16 @@ async fn server(args: Config) -> anyhow::Result<()> {
 
     println!("Node ID: {}", my_addr.node_id);
 
-    // Listen for incomming connections
-    while let Some(connecting) = endpoint.accept().await {
-        let connection = connecting.await;
+    let matchmaker = Matchmaker::new(endpoint.clone());
+    let router = iroh::protocol::Router::builder(endpoint)
+        .accept(MATCH_ALPN, Arc::new(matchmaker))
+        .spawn()
+        .await?;
 
-        match connection {
-            Ok(conn) => {
-                info!(
-                    connection_id = conn.stable_id(),
-                    "Accepted connection from client"
-                );
+    // wait for shutdown
+    tokio::signal::ctrl_c().await?;
 
-                // Spawn a task to handle the new connection
-                tokio::task::spawn(matchmaker::handle_connection(endpoint.clone(), conn));
-            }
-            Err(e) => error!("Error opening client connection: {e:?}"),
-        }
-    }
+    router.shutdown().await?;
 
     info!("Server shutdown");
 

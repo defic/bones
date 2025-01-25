@@ -14,6 +14,7 @@ pub mod prelude {
         ecs::prelude::*, instant::Instant, time::*, Game, GamePlugin, Session, SessionCommand,
         SessionOptions, SessionPlugin, SessionRunner, Sessions,
     };
+    pub use ustr::{ustr, Ustr, UstrMap, UstrSet};
 }
 
 pub use instant;
@@ -22,6 +23,7 @@ pub mod time;
 use std::{collections::VecDeque, fmt::Debug, sync::Arc};
 
 use crate::prelude::*;
+
 /// A bones game. This includes all of the game worlds, and systems.
 #[derive(Deref, DerefMut)]
 pub struct Session {
@@ -91,6 +93,25 @@ impl Session {
     /// This is the same as doing an [`std::mem::swap`] on `self.world`, but it is more explicit.
     pub fn restore(&mut self, world: &mut World) {
         std::mem::swap(&mut self.world, world)
+    }
+
+    /// Set the session runner for this session.
+    pub fn set_session_runner(&mut self, runner: Box<dyn SessionRunner>) {
+        self.runner = runner;
+    }
+
+    /// Provides an interface for resetting various internal parts of the Session.
+    /// Note this does not fully reset the entire Session.
+    pub fn reset_internals(
+        &mut self,
+        reset_components: bool,
+        reset_entities: bool,
+        reset_systems: bool,
+    ) {
+        self.world.reset_internals(reset_components, reset_entities);
+        if reset_systems {
+            self.reset_remove_all_systems();
+        }
     }
 }
 
