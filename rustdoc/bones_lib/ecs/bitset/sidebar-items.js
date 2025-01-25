@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BITSET_EXP"],"fn":["create_bitset"],"macro":["bitor","bitset","impl_bitset"],"struct":["BitFmt","BitSetVec"],"trait":["BitSet"]};

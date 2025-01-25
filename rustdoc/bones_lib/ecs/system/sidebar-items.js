@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["In","Res","ResInit","ResMut","ResMutInit","StaticSystem"],"trait":["IntoSystem","System","SystemParam"],"type":["Comp","CompMut"]};

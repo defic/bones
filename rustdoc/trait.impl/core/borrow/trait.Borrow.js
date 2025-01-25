@@ -1,0 +1,3 @@
+(function() {var implementors = {
+"bones_framework":[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.81.0/core/borrow/trait.Borrow.html\" title=\"trait core::borrow::Borrow\">Borrow</a>&lt;FluentResource&gt; for <a class=\"struct\" href=\"bones_framework/localization/struct.FluentResourceAsset.html\" title=\"struct bones_framework::localization::FluentResourceAsset\">FluentResourceAsset</a>"]]
+};if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

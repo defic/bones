@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["setup_logs"],"mod":["animation","asset","audio","debug","external","glam","input","lib","localization","logging","networking","params","prelude","render","storage","time","utils"],"struct":["DefaultGamePlugin","DefaultSessionPlugin","ExitBones"],"trait":["AssetServerExt"]};

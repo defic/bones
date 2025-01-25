@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CameraSize"],"fn":["plugin","spawn_default_camera"],"struct":["Camera","CameraShake","CameraTraumaEvents","ClearColor","ShakeNoise","Viewport"]};

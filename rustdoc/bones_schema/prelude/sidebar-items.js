@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"derive":["HasSchema"],"enum":["EnumTagType","Primitive","SchemaKind"],"struct":["EnumSchemaInfo","Schema","SchemaData","SchemaLayoutInfo","StructFieldInfo","StructSchemaInfo","Unsafe","VariantInfo"],"trait":["FromType","HasSchema"]};

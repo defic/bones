@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["asset_io","handle_asset_changes"],"mod":["prelude"],"struct":["BonesBevyRenderer","BonesGame"]};

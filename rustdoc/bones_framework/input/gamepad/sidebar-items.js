@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["GamepadAxis","GamepadButton","GamepadConnectionEventKind","GamepadEvent","GamepadRumbleRequest"],"struct":["GamepadAxisEvent","GamepadButtonEvent","GamepadConnectionEvent","GamepadInputs","GamepadRumbleIntensity","GamepadsRumble"]};

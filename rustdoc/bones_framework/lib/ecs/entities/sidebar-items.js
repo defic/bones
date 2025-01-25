@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["QuerySingleError"],"fn":["Optional","OptionalMut"],"struct":["Entities","EntitiesIterWith","Entity","EntityIterator","OptionalQueryItem","OptionalQueryItemMut"],"trait":["QueryItem"]};
