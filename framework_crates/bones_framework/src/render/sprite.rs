@@ -3,7 +3,7 @@
 use crate::prelude::*;
 
 /// Sprite session plugin.
-pub fn sprite_plugin(_session: &mut Session) {
+pub fn sprite_plugin(_session: &mut SessionBuilder) {
     Sprite::register_schema();
     AtlasSprite::register_schema();
 }
@@ -19,7 +19,9 @@ pub enum Image {
     External(u32),
 }
 
-struct ImageAssetLoader;
+/// Implements [`AssetLoader`] which attempts to return a [`SchemaBox`]
+/// containing [`Image::Data`] schema data.
+pub struct ImageAssetLoader;
 impl AssetLoader for ImageAssetLoader {
     fn load(&self, _ctx: AssetLoadCtx, bytes: &[u8]) -> BoxedFuture<anyhow::Result<SchemaBox>> {
         let bytes = bytes.to_vec();

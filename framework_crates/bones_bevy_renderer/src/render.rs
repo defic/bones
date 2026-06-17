@@ -91,6 +91,7 @@ impl BonesImageIds {
     }
 }
 
+/// Updates the [`BonesGame`]'s [`bones::ClearColor`] with the [`ClearColor`] from bevy.
 pub fn sync_clear_color(mut clear_color: ResMut<ClearColor>, game: Res<BonesGame>) {
     for name in &game.sorted_session_keys {
         let session = game.sessions.get(*name).unwrap();
@@ -112,11 +113,12 @@ pub fn sync_bones_window(mut game: ResMut<BonesGame>, mut window_query: Query<&m
             game.insert_shared_resource(bones::Window {
                 size: vec2(window.width(), window.height()),
                 fullscreen: matches!(&window.mode, WindowMode::BorderlessFullscreen),
+                focused: window.focused,
             });
             game.shared_resource_cell().unwrap()
         }
     };
-    let bones_window = bones_window.borrow().unwrap();
+    let mut bones_window = bones_window.borrow_mut().unwrap();
 
     let is_fullscreen = matches!(&window.mode, WindowMode::BorderlessFullscreen);
     if is_fullscreen != bones_window.fullscreen {
@@ -126,6 +128,8 @@ pub fn sync_bones_window(mut game: ResMut<BonesGame>, mut window_query: Query<&m
             WindowMode::Windowed
         };
     }
+    bones_window.focused = window.focused;
+    bones_window.size = vec2(window.width(), window.height());
 }
 
 /// Sync bones cameras with Bevy
@@ -156,6 +160,26 @@ pub fn sync_cameras(
             },
             OrthographicProjection {
                 scaling_mode: match bones_camera.size {
+                    bones::CameraSize::Fixed { width, height } => {
+                        ScalingMode::Fixed { width, height }
+                    }
+                    bones::CameraSize::Max {
+                        max_width,
+                        max_height,
+                    } => ScalingMode::AutoMax {
+                        max_width,
+                        max_height,
+                    },
+                    bones::CameraSize::Min {
+                        min_width,
+                        min_height,
+                    } => ScalingMode::AutoMin {
+                        min_width,
+                        min_height,
+                    },
+                    bones::CameraSize::Window { pixels_per_unit } => {
+                        ScalingMode::WindowSize(pixels_per_unit)
+                    }
                     bones::CameraSize::FixedHeight(h) => ScalingMode::FixedVertical(h),
                     bones::CameraSize::FixedWidth(w) => ScalingMode::FixedHorizontal(w),
                 },
@@ -208,6 +232,7 @@ pub fn sync_cameras(
     }
 }
 
+/// Extracts the [`bones::Sprite`]s to be used in bevy's rendering.
 pub fn extract_bones_sprites(
     mut extracted_sprites: ResMut<ExtractedSprites>,
     game: Extract<Res<BonesGame>>,
@@ -340,6 +365,7 @@ pub fn extract_bones_sprites(
     }
 }
 
+/// Extracts the [`bones::TileLayer`]s & [`bones::Tile`]s to be used in bevy's rendering.
 pub fn extract_bones_tilemaps(
     mut extracted_sprites: ResMut<ExtractedSprites>,
     game: Extract<Res<BonesGame>>,
@@ -442,6 +468,7 @@ pub fn extract_bones_tilemaps(
     }
 }
 
+/// Syncs the [`bones::Path2d`]s with bevy's [`lyon::Path`]s.
 pub fn sync_bones_path2ds(
     game: Res<BonesGame>,
     mut commands: Commands,

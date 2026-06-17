@@ -511,27 +511,58 @@ impl AssetServer {
                         dependencies: partial.dependencies,
                         data: partial.data,
                     };
+                    // Loaded assets are gotten through a line of key/value maps starting with a handle.
+                    // The handle gets a cid, which gets the loaded asset. Since we are doing this in async,
+                    // when we update the server data, we need to update the key/value pairs in the reverse
+                    // of the 'get' order so that any handle at any time has an ultimate link to a loaded asset.
 
+                    server.store.assets.insert(partial.cid, loaded_asset);
+
+                    // Update reverse dependencies
+                    for dep in server
+                        .store
+                        .assets
+                        .get(&partial.cid)
+                        .unwrap()
+                        .dependencies
+                        .iter()
+                    {
+                        server
+                            .store
+                            .reverse_dependencies
+                            .entry(*dep)
+                            .or_default()
+                            .insert(handle);
+                    }
+
+                    // Assets are gotten with handles so after this, the asset will be noticeably updated.
+                    let previous_cid = server.store.asset_ids.insert(handle, partial.cid);
+
+                    // We can then remove any old data that we're not using anymore.
                     // If there is already loaded asset data for this path
-                    if let Some((_, cid)) = server.store.asset_ids.remove(&handle) {
-                        // Remove the old asset data
-                        let (_, previous_asset) = server.store.assets.remove(&cid).unwrap();
+                    if let Some(cid) = previous_cid {
+                        // If no other handles use this content
+                        if server.store.asset_ids.iter().all(|map| *map.value() != cid) {
+                            // Remove the old asset data
+                            tracing::debug!(?cid, "Removing asset content");
+                            let (_, previous_asset) = server.store.assets.remove(&cid).unwrap();
 
-                        // Remove the previous asset's reverse dependencies.
-                        //
-                        // aka. now that we are removing the old asset, none of the assets that the
-                        // old asset dependended on should have a reverse dependency record saying that
-                        // this asset depends on it.
-                        //
-                        // In other words, this asset is removed and doesn't depend on anything else
-                        // anymore.
-                        for dep in previous_asset.dependencies.iter() {
-                            server
-                                .store
-                                .reverse_dependencies
-                                .get_mut(dep)
-                                .unwrap()
-                                .remove(&handle);
+                            // Remove the previous asset's reverse dependencies.
+                            //
+                            // aka. now that we are removing the old asset, none of the assets that the
+                            // old asset dependended on should have a reverse dependency record saying that
+                            // this asset depends on it.
+                            //
+                            // In other words, this asset is removed and doesn't depend on anything else
+                            // anymore.
+                            for dep in previous_asset.dependencies.iter() {
+                                server
+                                    .store
+                                    .reverse_dependencies
+                                    .get_mut(dep)
+                                    .unwrap()
+                                    .remove(&handle);
+                            }
                         }
 
                         // If there are any assets that depended on this asset, they now need to be re-loaded.
@@ -545,18 +576,6 @@ impl AssetServer {
                         }
                     }
 
-                    // Update reverse dependencies
-                    for dep in loaded_asset.dependencies.iter() {
-                        server
-                            .store
-                            .reverse_dependencies
-                            .entry(*dep)
-                            .or_default()
-                            .insert(handle);
-                    }
-
-                    server.store.asset_ids.insert(handle, partial.cid);
-                    server.store.assets.insert(partial.cid, loaded_asset);
                     server.load_progress.inc_loaded();
 
                     Ok::<_, anyhow::Error>(())
@@ -787,7 +806,7 @@ impl AssetServer {
     }
 
     /// Borrow a [`LoadedAsset`] associated to the given handle.
-    pub fn get_asset_untyped(&self, handle: UntypedHandle) -> Option<MapRef<Cid, LoadedAsset>> {
+    pub fn get_asset_untyped(&self, handle: UntypedHandle) -> Option<MapRef<'_, Cid, LoadedAsset>> {
         let cid = self.store.asset_ids.get(&handle)?;
         self.store.assets.get(&cid)
     }
@@ -796,7 +815,7 @@ impl AssetServer {
     pub fn get_asset_untyped_mut(
         &self,
         handle: UntypedHandle,
-    ) -> Option<MapRefMut<Cid, LoadedAsset>> {
+    ) -> Option<MapRefMut<'_, Cid, LoadedAsset>> {
         let cid = self.store.asset_ids.get(&handle)?;
         self.store.assets.get_mut(&cid)
     }
@@ -807,17 +826,17 @@ impl AssetServer {
     ///
     /// Panics if the assets have not be loaded yet with [`AssetServer::load_assets`].
     #[track_caller]
-    pub fn core(&self) -> MappedMutexGuard<AssetPack> {
+    pub fn core(&self) -> MappedMutexGuard<'_, AssetPack> {
         MutexGuard::map(self.store.core_pack.lock(), |x| x.as_mut().unwrap())
     }
 
     /// Get the core asset pack's root asset.
-    pub fn root<T: HasSchema>(&self) -> MappedMapRef<Cid, LoadedAsset, T> {
+    pub fn root<T: HasSchema>(&self) -> MappedMapRef<'_, Cid, LoadedAsset, T> {
         self.get(self.core().root.typed())
     }
 
     /// Get the core asset pack's root asset as a type-erased [`SchemaBox`].
-    pub fn untyped_root(&self) -> MappedMapRef<Cid, LoadedAsset, SchemaBox> {
+    pub fn untyped_root(&self) -> MappedMapRef<'_, Cid, LoadedAsset, SchemaBox> {
         self.get_untyped(self.core().root)
     }
 
@@ -830,11 +849,13 @@ impl AssetServer {
     ///
     /// # Panics
     ///
-    /// Panics if the asset is not loaded or if the asset asset with the given handle doesn't have a
+    /// Panics if the asset is not loaded or if the asset with the given handle doesn't have a
     /// schema matching `T`.
     #[track_caller]
-    pub fn get<T: HasSchema>(&self, handle: Handle<T>) -> MappedMapRef<Cid, LoadedAsset, T> {
-        self.try_get(handle).unwrap().unwrap()
+    pub fn get<T: HasSchema>(&self, handle: Handle<T>) -> MappedMapRef<'_, Cid, LoadedAsset, T> {
+        self.try_get(handle)
+            .expect("asset not found (handle has no cid)")
+            .expect("asset does not have matching schema for given type")
     }
 
     /// Borrow a loaded asset.
@@ -843,7 +864,10 @@ impl AssetServer {
     ///
     /// Panics if the asset is not loaded.
     #[track_caller]
-    pub fn get_untyped(&self, handle: UntypedHandle) -> MappedMapRef<Cid, LoadedAsset, SchemaBox> {
+    pub fn get_untyped(
+        &self,
+        handle: UntypedHandle,
+    ) -> MappedMapRef<'_, Cid, LoadedAsset, SchemaBox> {
         self.try_get_untyped(handle).unwrap()
     }
 
@@ -856,7 +880,7 @@ impl AssetServer {
     pub fn get_untyped_mut(
         &self,
         handle: UntypedHandle,
-    ) -> MappedMapRefMut<Cid, LoadedAsset, SchemaBox> {
+    ) -> MappedMapRefMut<'_, Cid, LoadedAsset, SchemaBox> {
         self.try_get_untyped_mut(handle).unwrap()
     }
 
@@ -872,10 +896,7 @@ impl AssetServer {
             SchemaMismatchError,
         >,
     > {
-        let cid = match self.store.asset_ids.get(&handle.untyped()) {
-            Some(cid) => cid,
-            None => return None,
-        };
+        let cid = self.store.asset_ids.get(&handle.untyped())?;
         Some(
             MapRef::try_map(self.store.assets.get(&cid).unwrap(), |x| {
                 let asset = &x.data;
@@ -897,7 +918,7 @@ impl AssetServer {
     pub fn try_get_untyped(
         &self,
         handle: UntypedHandle,
-    ) -> Option<MappedMapRef<Cid, LoadedAsset, SchemaBox>> {
+    ) -> Option<MappedMapRef<'_, Cid, LoadedAsset, SchemaBox>> {
         let cid = self.store.asset_ids.get(&handle)?;
         Some(MapRef::map(self.store.assets.get(&cid).unwrap(), |x| {
             &x.data
@@ -908,7 +929,7 @@ impl AssetServer {
     pub fn try_get_untyped_mut(
         &self,
         handle: UntypedHandle,
-    ) -> Option<MappedMapRefMut<Cid, LoadedAsset, SchemaBox>> {
+    ) -> Option<MappedMapRefMut<'_, Cid, LoadedAsset, SchemaBox>> {
         let cid = self.store.asset_ids.get_mut(&handle)?;
         Some(MapRefMut::map(
             self.store.assets.get_mut(&cid).unwrap(),
@@ -947,7 +968,7 @@ impl AssetServer {
     pub fn get_mut<T: HasSchema>(
         &mut self,
         handle: &Handle<T>,
-    ) -> MappedMapRefMut<Cid, LoadedAsset, T> {
+    ) -> MappedMapRefMut<'_, Cid, LoadedAsset, T> {
         let cid = self
             .store
             .asset_ids
@@ -1023,7 +1044,6 @@ pub use metadata::*;
 mod metadata {
     use bones_utils::LabeledId;
     use serde::de::{DeserializeSeed, Error, Unexpected, VariantAccess, Visitor};
-    use ustr::{ustr, Ustr};
 
     use super::*;
 
@@ -1301,14 +1321,13 @@ mod metadata {
         {
             // SOUND: schema asserts this is a SchemaVec.
             let v = unsafe { &mut *(self.ptr.as_ptr() as *mut SchemaVec) };
+            let item_schema = v.schema();
             loop {
-                let item_schema = v.schema();
                 let mut item = SchemaBox::default(item_schema);
-                let item_ref = item.as_mut();
                 if seq
                     .next_element_seed(SchemaPtrLoadCtx {
                         ctx: self.ctx,
-                        ptr: item_ref,
+                        ptr: item.as_mut(),
                     })?
                     .is_none()
                 {
@@ -1344,19 +1363,21 @@ mod metadata {
         {
             // SOUND: schema asserts this is a SchemaMap.
             let v = unsafe { &mut *(self.ptr.as_ptr() as *mut SchemaMap) };
-            let is_ustr = v.key_schema() == Ustr::schema();
-            if v.key_schema() != String::schema() && !is_ustr {
-                return Err(A::Error::custom(
-                    "Can only deserialize maps with `String` or `Ustr` keys.",
-                ));
-            }
-            while let Some(key) = map.next_key::<String>()? {
-                let key = if is_ustr {
-                    SchemaBox::new(ustr(&key))
-                } else {
-                    SchemaBox::new(key)
-                };
-                let mut value = SchemaBox::default(v.value_schema());
+
+            let key_schema = v.key_schema();
+            let value_schema = v.value_schema();
+            loop {
+                let mut key = SchemaBox::default(key_schema);
+                if map
+                    .next_key_seed(SchemaPtrLoadCtx {
+                        ctx: self.ctx,
+                        ptr: key.as_mut(),
+                    })?
+                    .is_none()
+                {
+                    break;
+                }
+                let mut value = SchemaBox::default(value_schema);
                 map.next_value_seed(SchemaPtrLoadCtx {
                     ctx: self.ctx,
                     ptr: value.as_mut(),

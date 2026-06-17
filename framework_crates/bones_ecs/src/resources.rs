@@ -75,13 +75,13 @@ impl UntypedResource {
 
     /// Borrow the resource.
     #[track_caller]
-    pub fn borrow(&self) -> Ref<Option<SchemaBox>> {
+    pub fn borrow(&self) -> Ref<'_, Option<SchemaBox>> {
         self.cell.borrow()
     }
 
     /// Mutably borrow the resource.
     #[track_caller]
-    pub fn borrow_mut(&self) -> RefMut<Option<SchemaBox>> {
+    pub fn borrow_mut(&self) -> RefMut<'_, Option<SchemaBox>> {
         self.cell.borrow_mut()
     }
 
@@ -200,6 +200,16 @@ impl UntypedResources {
             |_, cell| cell.clone(),
         )
     }
+
+    /// Removes all resourcse that are not shared resources.
+    pub fn clear_owned_resources(&mut self) {
+        for (schema_id, resource_cell) in self.resources.iter_mut() {
+            let is_shared = self.shared_resources.contains_key(schema_id);
+            if !is_shared {
+                resource_cell.remove();
+            }
+        }
+    }
 }
 
 /// A collection of resources.
@@ -229,7 +239,7 @@ impl Resources {
     ///
     /// See [get()][Self::get]
     pub fn contains<T: HasSchema>(&self) -> bool {
-        self.untyped.resources.contains_key(&T::schema().id())
+        self.untyped.contains(T::schema().id())
     }
 
     /// Remove a resource from the store, if it is present.
@@ -243,7 +253,7 @@ impl Resources {
 
     /// Borrow a resource.
     #[track_caller]
-    pub fn get<T: HasSchema>(&self) -> Option<Ref<T>> {
+    pub fn get<T: HasSchema>(&self) -> Option<Ref<'_, T>> {
         let b = self.untyped.get(T::schema()).borrow();
         if b.is_some() {
             Some(Ref::map(b, |b| unsafe {
@@ -256,7 +266,7 @@ impl Resources {
 
     /// Borrow a resource.
     #[track_caller]
-    pub fn get_mut<T: HasSchema>(&self) -> Option<RefMut<T>> {
+    pub fn get_mut<T: HasSchema>(&self) -> Option<RefMut<'_, T>> {
         let b = self.untyped.get(T::schema()).borrow_mut();
         if b.is_some() {
             Some(RefMut::map(b, |b| unsafe {
@@ -284,6 +294,11 @@ impl Resources {
     /// Consume [`Resources`] and extract the underlying [`UntypedResources`].
     pub fn into_untyped(self) -> UntypedResources {
         self.untyped
+    }
+
+    /// Removes all resources that are not shared. Shared resources are preserved.
+    pub fn clear_owned_resources(&mut self) {
+        self.untyped.clear_owned_resources();
     }
 }
 
@@ -358,7 +373,7 @@ impl<T: HasSchema> AtomicResource<T> {
     /// Lock the resource for reading.
     ///
     /// This returns a read guard, very similar to an [`RwLock`][std::sync::RwLock].
-    pub fn borrow(&self) -> Option<Ref<T>> {
+    pub fn borrow(&self) -> Option<Ref<'_, T>> {
         let borrow = self.untyped.borrow();
         if borrow.is_some() {
             Some(Ref::map(borrow, |r| unsafe {
@@ -372,7 +387,7 @@ impl<T: HasSchema> AtomicResource<T> {
     /// Lock the resource for read-writing.
     ///
     /// This returns a write guard, very similar to an [`RwLock`][std::sync::RwLock].
-    pub fn borrow_mut(&self) -> Option<RefMut<T>> {
+    pub fn borrow_mut(&self) -> Option<RefMut<'_, T>> {
         let borrow = self.untyped.borrow_mut();
         if borrow.is_some() {
             Some(RefMut::map(borrow, |r| unsafe {
@@ -400,7 +415,7 @@ impl<T: HasSchema + FromWorld> AtomicResource<T> {
 
     /// Borrow the resource, initializing it if it doesn't exist.
     #[track_caller]
-    pub fn init_borrow(&self, world: &World) -> Ref<T> {
+    pub fn init_borrow(&self, world: &World) -> Ref<'_, T> {
         let map_borrow = |borrow| {
             // SOUND: we know the schema matches.
             Ref::map(borrow, |b: &Option<SchemaBox>| unsafe {
@@ -423,7 +438,7 @@ impl<T: HasSchema + FromWorld> AtomicResource<T> {
 
     /// Borrow the resource, initializing it if it doesn't exist.
     #[track_caller]
-    pub fn init_borrow_mut(&self, world: &World) -> RefMut<T> {
+    pub fn init_borrow_mut(&self, world: &World) -> RefMut<'_, T> {
         let mut borrow = self.untyped.borrow_mut();
         if unlikely(borrow.is_none()) {
             *borrow = Some(SchemaBox::new(T::from_world(world)));
@@ -434,20 +449,136 @@ impl<T: HasSchema + FromWorld> AtomicResource<T> {
     }
 }
 
+/// Utility container for storing set of [`UntypedResource`].
+/// Cloning
+#[derive(Default)]
+pub struct UntypedResourceSet {
+    resources: Vec<UntypedResource>,
+}
+
+impl Clone for UntypedResourceSet {
+    fn clone(&self) -> Self {
+        Self {
+            resources: self
+                .resources
+                .iter()
+                .map(|res| {
+                    if let Some(clone) = res.clone_data() {
+                        UntypedResource::new(clone)
+                    } else {
+                        UntypedResource::empty(res.schema())
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+impl UntypedResourceSet {
+    /// Insert a startup resource. On stage / session startup (first step), will be inserted into [`World`].
+    ///
+    /// If already exists, will be overwritten.
+    pub fn insert_resource<T: HasSchema>(&mut self, resource: T) {
+        // Update an existing resource of the same type.
+        for r in &mut self.resources {
+            if r.schema() == T::schema() {
+                let mut borrow = r.borrow_mut();
+
+                if let Some(b) = borrow.as_mut() {
+                    *b.cast_mut() = resource;
+                } else {
+                    *borrow = Some(SchemaBox::new(resource))
+                }
+                return;
+            }
+        }
+
+        // Or insert a new resource if we couldn't find one
+        self.resources
+            .push(UntypedResource::new(SchemaBox::new(resource)))
+    }
+
+    /// Init resource with default, and return mutable ref for modification.
+    /// If already exists, returns mutable ref to existing resource.
+    pub fn init_resource<T: HasSchema + Default>(&mut self) -> RefMut<'_, T> {
+        if !self.resources.iter().any(|x| x.schema() == T::schema()) {
+            self.insert_resource(T::default());
+        }
+        self.resource_mut::<T>().unwrap()
+    }
+
+    /// Get mutable reference to startup resource if found.
+    #[track_caller]
+    pub fn resource_mut<T: HasSchema>(&self) -> Option<RefMut<'_, T>> {
+        let res = self.resources.iter().find(|x| x.schema() == T::schema())?;
+        let borrow = res.borrow_mut();
+
+        if borrow.is_some() {
+            // SOUND: We know the type matches T
+            Some(RefMut::map(borrow, |b| unsafe {
+                b.as_mut().unwrap().as_mut().cast_into_mut_unchecked()
+            }))
+        } else {
+            None
+        }
+    }
+
+    /// Insert an [`UntypedResource`] with empty cell for [`Schema`] of `T`.
+    /// If resource already exists for this schema, overwrite it with empty.
+    pub fn insert_empty<T: HasSchema>(&mut self) {
+        for r in &mut self.resources {
+            if r.schema() == T::schema() {
+                let mut borrow = r.borrow_mut();
+                *borrow = None;
+                return;
+            }
+        }
+
+        // Or insert a new empty resource if we couldn't find one
+        self.resources.push(UntypedResource::empty(T::schema()));
+    }
+
+    /// Get immutable ref to Vec of resources
+    pub fn resources(&self) -> &Vec<UntypedResource> {
+        &self.resources
+    }
+
+    /// Insert resources in world. If resource already exists, overwrites it.
+    ///
+    /// If `remove_empty` is set, if resource cell is empty, it will remove the
+    /// resource from cell on world.
+    pub fn insert_on_world(&self, world: &mut World, remove_empty: bool) {
+        for resource in self.resources.iter() {
+            let resource_cell = world.resources.untyped().get_cell(resource.schema());
+
+            // Deep copy resource and insert into world.
+            if let Some(resource_copy) = resource.clone_data() {
+                resource_cell
+                    .insert(resource_copy)
+                    .expect("Schema mismatch error");
+            } else if remove_empty {
+                // Remove the resource on world
+                resource_cell.remove();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use crate::prelude::*;
+    #[derive(HasSchema, Clone, Debug, Default)]
+    #[repr(C)]
+    struct A(String);
+
+    #[derive(HasSchema, Clone, Debug, Default)]
+    #[repr(C)]
+    struct B(u32);
 
     #[test]
     fn sanity_check() {
-        #[derive(HasSchema, Clone, Debug, Default)]
-        #[repr(C)]
-        struct A(String);
-
-        #[derive(HasSchema, Clone, Debug, Default)]
-        #[repr(C)]
-        struct B(u32);
-
         let r1 = Resources::new();
 
         r1.insert(A(String::from("hi")));
@@ -469,5 +600,29 @@ mod test {
         r1.insert(B(2));
         assert_eq!(r1b.borrow().unwrap().0, 2);
         assert_eq!(r1a.borrow().unwrap().0, "world");
+    }
+
+    #[test]
+    fn resources_clear_owned_values() {
+        let mut r = Resources::new();
+
+        // insert A as non-shared resource
+        r.insert(A(String::from("foo")));
+
+        // Insert B as shared resource
+        r.untyped
+            .insert_cell(Arc::new(UntypedResource::new(SchemaBox::new(B(1)))))
+            .unwrap();
+
+        // Should only clear non-shared resources
+        r.clear_owned_resources();
+
+        // Verify non-shared was removed
+        let res_a = r.get::<A>();
+        assert!(res_a.is_none());
+
+        // Verify shared is still present
+        let res_b = r.get::<B>().unwrap();
+        assert_eq!(res_b.0, 1);
     }
 }

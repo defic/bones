@@ -12,18 +12,28 @@ pub mod prelude {
     pub use crate::*;
 }
 
-mod debug;
-mod storage;
+pub mod debug;
+/// Contains the filesystem storage backend types.
+pub mod storage;
 
-mod convert;
+/// Traits and implementations for converting between bevy and bones.
+pub mod convert;
 use convert::*;
-mod input;
+
+/// Input syncing and getting.
+pub mod input;
 use input::*;
-mod render;
+
+/// Contains the systems for extracting, syncing, and loading bones renderables.
+pub mod render;
 use render::*;
-mod ui;
+
+/// Systems for syncing and modifying egui. Contains the default game loading ui system.
+pub mod ui;
 use ui::*;
-mod rumble;
+
+/// Systems for syncing bones rumble controls.
+pub mod rumble;
 use bevy::{log::LogPlugin, prelude::*};
 use bones::GamepadsRumble;
 use bones_framework::prelude as bones;
@@ -67,8 +77,8 @@ pub struct BonesBevyRenderer {
 pub struct BonesGame(pub bones::Game);
 impl BonesGame {
     /// Shorthand for [`bones::AssetServer`] typed access to the shared resource
-    pub fn asset_server(&self) -> Option<bones::Ref<bones::AssetServer>> {
-        self.0.shared_resource()
+    pub fn asset_server(&self) -> Option<bones::Ref<'_, bones::AssetServer>> {
+        self.0.get_shared_resource()
     }
 }
 
@@ -166,7 +176,7 @@ impl BonesBevyRenderer {
         }
         app.init_resource::<BonesImageIds>();
 
-        if let Some(mut asset_server) = self.game.shared_resource_mut::<bones::AssetServer>() {
+        if let Some(mut asset_server) = self.game.get_shared_resource_mut::<bones::AssetServer>() {
             asset_server.set_game_version(self.game_version);
             asset_server.set_io(asset_io(&self.asset_dir, &self.packs_dir));
 
@@ -273,7 +283,7 @@ impl BonesBevyRenderer {
 }
 
 fn egui_ctx_initialized(game: Res<BonesGame>) -> bool {
-    game.shared_resource::<bones::EguiCtx>().is_some()
+    game.get_shared_resource::<bones::EguiCtx>().is_some()
 }
 
 fn assets_are_loaded(game: Res<BonesGame>) -> bool {
@@ -368,10 +378,9 @@ pub fn handle_asset_changes(
     mut bevy_egui_textures: ResMut<bevy_egui::EguiUserTextures>,
     mut bones_image_ids: ResMut<BonesImageIds>,
 ) {
-    if let Some(mut asset_server) = game.shared_resource_mut::<bones::AssetServer>() {
+    if let Some(mut asset_server) = game.get_shared_resource_mut::<bones::AssetServer>() {
         asset_server.handle_asset_changes(|asset_server, handle| {
-            let mut bones_egui_textures =
-                game.shared_resource_mut::<bones::EguiTextures>().unwrap();
+            let mut bones_egui_textures = game.shared_resource_mut::<bones::EguiTextures>();
             let Some(mut asset) = asset_server.get_asset_untyped_mut(handle) else {
                 // There was an issue loading the asset. The error will have been logged.
                 return;
@@ -394,7 +403,7 @@ pub fn handle_asset_changes(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_exits(game: Res<BonesGame>, mut exits: EventWriter<bevy::app::AppExit>) {
-    if **game.shared_resource::<bones::ExitBones>().unwrap() {
+    if **game.shared_resource::<bones::ExitBones>() {
         exits.send(bevy::app::AppExit);
     }
 }
