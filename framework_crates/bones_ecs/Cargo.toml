@@ -15,7 +15,7 @@ default = ["derive", "keysize16"]
 miri    = ["derive", "keysize10"]
 derive  = ["dep:bones_ecs_macros"]
 glam    = ["dep:glam", "dep:paste", "bones_schema/glam"]
-serde   = ["dep:serde"]
+serde   = ["dep:serde", "bones_schema/serde"]
 
 keysize10 = []
 keysize12 = []
@@ -43,4 +43,6 @@ thiserror   = "1.0"
 tracing     = { workspace = true }
 
 [dev-dependencies]
-glam = "0.24"
+glam       = "0.24"
+serde_json = "1.0"
+rmp-serde  = "1.3"

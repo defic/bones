@@ -201,6 +201,18 @@ impl UntypedResources {
         )
     }
 
+    /// Get clones of all resource cells currently present in the store.
+    ///
+    /// Cells may be populated or empty ([`UntypedResource::borrow`] returns `None`). This is used
+    /// to enumerate resources for tasks like serialization.
+    pub fn cells(&self) -> Vec<AtomicUntypedResource> {
+        self.resources
+            .read_only_view()
+            .values()
+            .cloned()
+            .collect()
+    }
+
     /// Removes all resourcse that are not shared resources.
     pub fn clear_owned_resources(&mut self) {
         for (schema_id, resource_cell) in self.resources.iter_mut() {

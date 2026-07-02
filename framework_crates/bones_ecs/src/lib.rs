@@ -24,6 +24,35 @@ pub use bones_utils as utils;
 mod world;
 pub use world::{FromWorld, World};
 
+#[cfg(feature = "serde")]
+mod serialization;
+
+pub use skip_serialize::SkipSerialize;
+mod skip_serialize {
+    use crate::prelude::*;
+
+    /// Schema type-data marker that **excludes** a component or resource type from [`World`]
+    /// serialization (see the `serde` feature).
+    ///
+    /// By default every component and resource in a serialized [`World`] must be serializable, and
+    /// an opaque/unserializable type is a hard error. Tag a type with this marker to deliberately
+    /// skip it instead — intended for **local runtime state that every machine rebuilds itself**
+    /// and that is not part of the simulation, such as a scripting engine handle. Skipped types are
+    /// absent from the snapshot and are expected to be re-created locally on deserialize.
+    ///
+    /// Only mark types whose absence cannot cause divergence. Marking a type that holds
+    /// authoritative simulation state will silently desync clients.
+    ///
+    /// ```ignore
+    /// #[derive(HasSchema, Clone)]
+    /// #[schema(no_default)]
+    /// #[type_data(SkipSerialize)]
+    /// struct LuaEngine { /* Arc<...>, not sim state */ }
+    /// ```
+    #[derive(HasSchema, Clone, Default)]
+    pub struct SkipSerialize;
+}
+
 /// The prelude.
 pub mod prelude {
     pub use atomicell::*;
@@ -39,7 +68,7 @@ pub mod prelude {
         resources::*,
         stage::{CoreStage::*, *},
         system::*,
-        FromWorld, UnwrapMany, World,
+        FromWorld, SkipSerialize, UnwrapMany, World,
     };
 
     #[cfg(feature = "derive")]

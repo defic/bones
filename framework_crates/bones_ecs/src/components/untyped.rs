@@ -541,6 +541,15 @@ impl UntypedComponentStore {
         self.get_idx_mut(i).ok_or(QuerySingleError::NoEntities)
     }
 
+    /// Iterates immutably over `(entity_index, value)` for every stored component, ascending by
+    /// index.
+    ///
+    /// Unlike [`iter`][Self::iter], this also yields the entity index each component is stored at,
+    /// which is needed to serialize the store sparsely.
+    pub fn iter_indexed(&self) -> impl Iterator<Item = (u32, SchemaRef<'_>)> {
+        (0..self.max_id).filter_map(|i| self.get_idx(i).map(|r| (i as u32, r)))
+    }
+
     /// Iterates immutably over all components of this type.
     ///
     /// Very fast but doesn't allow joining with other component types.

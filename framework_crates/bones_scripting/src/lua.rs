@@ -43,7 +43,11 @@ pub fn lua_game_plugin(game: &mut Game) {
 pub struct LuaPluginLoaderSessionPlugin(pub Arc<Vec<Handle<LuaPlugin>>>);
 
 /// Resource containing the lua plugins that have been installed in this session.
+///
+/// Excluded from [`World`] serialization via [`SkipSerialize`]: this is local runtime state
+/// (loaded-script handles) that every machine sets up itself, not simulation state.
 #[derive(HasSchema, Deref, DerefMut, Default, Clone)]
+#[type_data(SkipSerialize)]
 pub struct LuaPlugins(pub Arc<Vec<Handle<LuaPlugin>>>);
 
 impl SessionPlugin for LuaPluginLoaderSessionPlugin {
@@ -169,8 +173,14 @@ impl WorldRef {
 }
 
 /// Resource used to access the lua scripting engine.
+///
+/// Excluded from [`World`] serialization via [`SkipSerialize`]: the engine (Lua VM, executor,
+/// compiled-script cache) is opaque, local runtime state that each machine rebuilds itself from the
+/// same scripts. It is not simulation state and must never be sent over the wire. All authoritative
+/// gameplay state must live in Rust-typed components, never in Lua-side globals.
 #[derive(HasSchema, Clone)]
 #[schema(no_default)]
+#[type_data(SkipSerialize)]
 pub struct LuaEngine {
     /// The thread-local task executor that is used to spawn any tasks that need access to the
     /// lua engine which can only be accessed on it's own thread.

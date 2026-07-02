@@ -55,7 +55,16 @@ impl Default for Entity {
 ///
 /// It also holds a list of entities that were recently killed, which allows to remove components of
 /// deleted entities at the end of a game frame.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+///
+/// # Serialization
+///
+/// When the `serde` feature is enabled, [`Entities`] uses a custom, **compact** serialization
+/// instead of dumping its full internal buffers. A default [`Entities`] holds an alive bitset and a
+/// generation `Vec` sized to the entire keyspace (hundreds of KB at `keysize16`), almost all of
+/// which is empty. The compact form stores only `next_id`, `has_deleted`, the `killed` list, the
+/// indices of alive entities, and the *nonzero* generation counters. This preserves bit-exact
+/// future entity index/generation allocation across machines while avoiding large blocks of empty
+/// bytes. See `docs/adr/0001-world-serialization-wire-format.md`.
 #[derive(Clone, HasSchema)]
 pub struct Entities {
     /// Bitset containing all living entities
@@ -67,9 +76,16 @@ pub struct Entities {
     /// bitset.
     has_deleted: bool,
 }
+
 impl std::fmt::Debug for Entities {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Entities").finish_non_exhaustive()
+        f.debug_struct("Entities")
+            .field("alive_len", &self.alive.len())
+            .field("generation_len", &self.generation.len())
+            .field("killed_len", &self.killed.len())
+            .field("next_id", &self.next_id)
+            .field("has_deleted", &self.has_deleted)
+            .finish()
     }
 }
 
@@ -82,6 +98,63 @@ impl Default for Entities {
             next_id: 0,
             has_deleted: false,
         }
+    }
+}
+
+/// Compact, canonical on-the-wire form of [`Entities`]. Only the data needed for a bit-exact
+/// round-trip is stored; the large default buffers are reconstructed on deserialize.
+#[cfg(feature = "serde")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EntitiesData {
+    next_id: usize,
+    has_deleted: bool,
+    killed: Vec<Entity>,
+    /// Indices of alive entities, ascending.
+    alive: Vec<u32>,
+    /// `(index, generation)` pairs for slots whose generation counter is nonzero, ascending by
+    /// index. Includes dead/reused slots, which is required so future `create()` calls allocate
+    /// identical generations on every machine.
+    generations: Vec<(u32, u32)>,
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Entities {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Iterating `0..next_id` yields ascending indices, giving canonical (deterministic) output.
+        let alive: Vec<u32> = (0..self.next_id)
+            .filter(|&i| self.alive.bit_test(i))
+            .map(|i| i as u32)
+            .collect();
+        let generations: Vec<(u32, u32)> = (0..self.next_id)
+            .filter(|&i| self.generation[i] != 0)
+            .map(|i| (i as u32, self.generation[i]))
+            .collect();
+        EntitiesData {
+            next_id: self.next_id,
+            has_deleted: self.has_deleted,
+            killed: self.killed.clone(),
+            alive,
+            generations,
+        }
+        .serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Entities {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let data = EntitiesData::deserialize(deserializer)?;
+        let mut entities = Entities::default();
+        entities.next_id = data.next_id;
+        entities.has_deleted = data.has_deleted;
+        entities.killed = data.killed;
+        for i in data.alive {
+            entities.alive.bit_set(i as usize);
+        }
+        for (i, generation) in data.generations {
+            entities.generation[i as usize] = generation;
+        }
+        Ok(entities)
     }
 }
 

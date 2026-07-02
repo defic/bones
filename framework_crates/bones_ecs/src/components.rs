@@ -95,6 +95,17 @@ impl ComponentStores {
             |_key, value| value.clone(),
         )
     }
+
+    /// Get clones of the cells for all component stores currently present.
+    ///
+    /// Used to enumerate component storages for tasks like serialization.
+    pub fn cells(&self) -> Vec<UntypedAtomicComponentStore> {
+        self.components
+            .read_only_view()
+            .values()
+            .cloned()
+            .collect()
+    }
 }
 
 #[cfg(test)]
