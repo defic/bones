@@ -1,9 +1,0 @@
-(function() {
-    var implementors = Object.fromEntries([["bones_asset",[["impl&lt;'a, 'srv, 'ptr, 'de&gt; <a class=\"trait\" href=\"https://docs.rs/serde/1.0.210/serde/de/trait.DeserializeSeed.html\" title=\"trait serde::de::DeserializeSeed\">DeserializeSeed</a>&lt;'de&gt; for <a class=\"struct\" href=\"bones_asset/struct.SchemaPtrLoadCtx.html\" title=\"struct bones_asset::SchemaPtrLoadCtx\">SchemaPtrLoadCtx</a>&lt;'a, 'srv, 'ptr&gt;"],["impl&lt;'asset, 'de&gt; <a class=\"trait\" href=\"https://docs.rs/serde/1.0.210/serde/de/trait.DeserializeSeed.html\" title=\"trait serde::de::DeserializeSeed\">DeserializeSeed</a>&lt;'de&gt; for <a class=\"struct\" href=\"bones_asset/struct.MetaAssetLoadCtx.html\" title=\"struct bones_asset::MetaAssetLoadCtx\">MetaAssetLoadCtx</a>&lt;'asset&gt;"]]],["bones_schema",[["impl&lt;'a, 'de&gt; <a class=\"trait\" href=\"https://docs.rs/serde/1.0.210/serde/de/trait.DeserializeSeed.html\" title=\"trait serde::de::DeserializeSeed\">DeserializeSeed</a>&lt;'de&gt; for <a class=\"struct\" href=\"bones_schema/ptr/struct.SchemaRefMut.html\" title=\"struct bones_schema::ptr::SchemaRefMut\">SchemaRefMut</a>&lt;'a&gt;"],["impl&lt;'de&gt; <a class=\"trait\" href=\"https://docs.rs/serde/1.0.210/serde/de/trait.DeserializeSeed.html\" title=\"trait serde::de::DeserializeSeed\">DeserializeSeed</a>&lt;'de&gt; for <a class=\"struct\" href=\"bones_schema/ser_de/struct.SchemaDeserializer.html\" title=\"struct bones_schema::ser_de::SchemaDeserializer\">SchemaDeserializer</a>"]]]]);
-    if (window.register_implementors) {
-        window.register_implementors(implementors);
-    } else {
-        window.pending_implementors = implementors;
-    }
-})()
-//{"start":57,"fragment_lengths":[737,715]}
