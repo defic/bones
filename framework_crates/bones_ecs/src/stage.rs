@@ -8,7 +8,11 @@ use crate::prelude::*;
 /// that specifies the unique ID of the stage that being run.
 ///
 /// If the stage is `Ulid(0)`, the default ID, then that means the startup stage is being run.
+///
+/// [`SkipSerialize`]: scheduler bookkeeping, not game state — it must never enter a canonical
+/// `World` snapshot (it would change snapshot bytes/hashes whenever stages are in use).
 #[derive(Deref, DerefMut, Clone, Copy, HasSchema, Default)]
+#[type_data(SkipSerialize)]
 pub struct CurrentSystemStage(pub Ulid);
 
 /// Builder for [`SystemStages`]. It is immutable once created,
@@ -529,7 +533,11 @@ impl<'a> SystemParam for Commands<'a> {
 /// Resource tracking if Session has started (startup systems executed and resources inserted).
 /// If field is set to false, that operation needs to be handled on next stage run.
 /// If resource is not present, assumed to have not started (and will be initialized upon next stage execution).
+///
+/// [`SkipSerialize`]: scheduler bookkeeping, not game state (see [`CurrentSystemStage`]). A
+/// deserialized world simply re-runs startup handling on its next stage execution.
 #[derive(Copy, Clone, HasSchema, Default)]
+#[type_data(SkipSerialize)]
 pub struct SessionStarted {
     /// Have startup systems executed?
     pub startup_systems_executed: bool,
@@ -540,7 +548,10 @@ pub struct SessionStarted {
 
 /// Resource tracking which of single success systems in `Session`'s [`SystemStages`] have completed.
 /// Success is tracked to
+///
+/// [`SkipSerialize`]: scheduler bookkeeping, not game state (see [`CurrentSystemStage`]).
 #[derive(HasSchema, Clone, Default)]
+#[type_data(SkipSerialize)]
 pub struct SingleSuccessSystems {
     /// Set of indices of [`SystemStages`]'s single success systems that have succeeded.
     pub systems_succeeded: HashSet<usize>,
