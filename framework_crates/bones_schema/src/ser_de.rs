@@ -21,7 +21,8 @@ mod serializer_deserializer {
     /// A struct that implements [`Serialize`] and wraps around a [`SchemaRef`] to serialize the value
     /// using it's schema.
     ///
-    /// This will error if there are opaque types in the schema ref that cannot be serialized.
+    /// This will error if there are opaque types in the schema ref that cannot be serialized,
+    /// unless they carry [`SchemaSerialize`] type data.
     pub struct SchemaSerializer<'a>(pub SchemaRef<'a>);
 
     impl<'a> Serialize for SchemaSerializer<'a> {
@@ -29,6 +30,11 @@ mod serializer_deserializer {
         where
             S: serde::Serializer,
         {
+            // Use custom serializer if present.
+            if let Some(schema_serialize) = self.0.schema().type_data.get::<SchemaSerialize>() {
+                return schema_serialize.serialize(self.0, serializer);
+            }
+
             // Specifically handle `Ustr`
             if let Ok(u) = self.0.try_cast::<Ustr>() {
                 return serializer.serialize_str(u);
@@ -128,7 +134,10 @@ mod serializer_deserializer {
                     PrimitiveRef::String(n) => serializer.serialize_str(n),
                     PrimitiveRef::Opaque { .. } => {
                         use serde::ser::Error;
-                        Err(S::Error::custom("Cannot serialize opaque types"))
+                        Err(S::Error::custom(
+                            "Opaque types must be #[repr(C)] or have `SchemaSerialize` type data \
+                            in order to be serialized.",
+                        ))
                     }
                 },
             }
@@ -531,6 +540,68 @@ impl<T: HasSchema + for<'de> Deserialize<'de>> FromType<T> for SchemaDeserialize
 
                 Ok(())
             },
+        }
+    }
+}
+
+/// Derivable schema [`type_data`][SchemaData::type_data] for types that implement
+/// [`Serialize`].
+///
+/// This allows you to use serde to implement custom serialization logic instead of the default
+/// schema-walking one used for `#[repr(C)]` types that implement [`HasSchema`], making it
+/// possible to serialize opaque types.
+///
+/// [`SchemaSerializer`] checks for this type data first and delegates to it when present.
+pub struct SchemaSerialize {
+    /// Casts a [`SchemaRef`] of this type to a serializable trait object.
+    pub as_serialize_fn: for<'a> fn(SchemaRef<'a>) -> &'a dyn erased_serde::Serialize,
+}
+
+unsafe impl HasSchema for SchemaSerialize {
+    fn schema() -> &'static Schema {
+        use std::{alloc::Layout, any::TypeId, sync::OnceLock};
+        static S: OnceLock<&'static Schema> = OnceLock::new();
+        let layout = Layout::new::<Self>();
+        S.get_or_init(|| {
+            SCHEMA_REGISTRY.register(SchemaData {
+                name: type_name::<Self>().into(),
+                full_name: format!("{}::{}", module_path!(), type_name::<Self>()).into(),
+                kind: SchemaKind::Primitive(Primitive::Opaque {
+                    size: layout.size(),
+                    align: layout.align(),
+                }),
+                type_id: Some(TypeId::of::<Self>()),
+                clone_fn: None,
+                drop_fn: None,
+                default_fn: None,
+                hash_fn: None,
+                eq_fn: None,
+                type_data: Default::default(),
+            })
+        })
+    }
+}
+
+impl SchemaSerialize {
+    /// Use this [`SchemaSerialize`] to serialize the value behind `reference` with the
+    /// `serializer`.
+    pub fn serialize<'a, S>(
+        &self,
+        reference: SchemaRef<'a>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        erased_serde::serialize((self.as_serialize_fn)(reference), serializer)
+    }
+}
+
+impl<T: HasSchema + Serialize> FromType<T> for SchemaSerialize {
+    fn from_type() -> Self {
+        SchemaSerialize {
+            // The cast validates that the reference's schema matches `T`'s.
+            as_serialize_fn: |reference| reference.cast::<T>(),
         }
     }
 }

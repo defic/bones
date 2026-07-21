@@ -19,8 +19,10 @@
 //!
 //! # Requirements
 //!
-//! - Every component/resource type must be serializable by the schema walker (i.e. `#[repr(C)]` or
-//!   carrying serde type-data). An opaque/unserializable type is a hard error at serialize time,
+//! - Every component/resource type must be serializable by the schema walker: either `#[repr(C)]`
+//!   or opaque with `SchemaSerialize` + `SchemaDeserialize` type data (i.e.
+//!   `#[derive_type_data(SchemaSerialize, SchemaDeserialize)]` on a type implementing serde's
+//!   `Serialize`/`Deserialize`). An opaque/unserializable type is a hard error at serialize time,
 //!   never silently skipped.
 //! - Before deserializing, every type in the snapshot must already be registered in
 //!   `SCHEMA_REGISTRY`. The natural way to guarantee this is to construct the sim systems first
@@ -597,6 +599,75 @@ mod tests {
         world.insert_resource(Opaque::default());
         let result = serde_json::to_string(&world);
         assert!(result.is_err(), "expected serialization of opaque type to error");
+    }
+
+    /// 6d. An opaque (non-repr(C)) type with `SchemaSerialize`/`SchemaDeserialize` type data
+    ///     round-trips through its custom serde impl instead of erroring — both as a resource and
+    ///     as a component.
+    #[test]
+    fn opaque_type_with_custom_serde_roundtrips() {
+        #[derive(
+            HasSchema, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize,
+        )]
+        #[schema(opaque)]
+        #[derive_type_data(SchemaSerialize, SchemaDeserialize)]
+        struct Physics {
+            // Deliberately not repr(C)-walkable: std Vec of tuples.
+            bodies: Vec<(u32, f32)>,
+            tick: u64,
+        }
+
+        #[derive(
+            HasSchema, Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize,
+        )]
+        #[schema(opaque)]
+        #[derive_type_data(SchemaSerialize, SchemaDeserialize)]
+        struct Inventory {
+            items: Vec<String>,
+        }
+
+        let world = build_world();
+        world.insert_resource(Physics {
+            bodies: vec![(0, 1.5), (2, -3.25)],
+            tick: 77,
+        });
+        world.run_system(
+            |entities: Res<Entities>, mut inventories: CompMut<Inventory>| {
+                let entity = entities.iter().next().unwrap();
+                inventories.insert(
+                    entity,
+                    Inventory {
+                        items: vec!["sword".into(), "shield".into()],
+                    },
+                );
+            },
+            (),
+        );
+
+        let json = serde_json::to_string(&world).unwrap();
+        let restored: World = serde_json::from_str(&json).unwrap();
+        assert_worlds_eq(&world, &restored);
+        assert_eq!(*world.resource::<Physics>(), *restored.resource::<Physics>());
+        for entity in world.resource::<Entities>().all_cloned() {
+            assert_eq!(
+                world.component::<Inventory>().get(entity),
+                restored.component::<Inventory>().get(entity),
+                "Inventory differs for {entity:?}"
+            );
+        }
+
+        // Canonical bytes still hold with the custom codec in play.
+        let restored_bytes = serde_json::to_vec(&restored).unwrap();
+        assert_eq!(
+            hash(&serde_json::to_vec(&world).unwrap()),
+            hash(&restored_bytes),
+            "identical state must hash equal with custom-serde types"
+        );
+
+        // MessagePack works too.
+        let mp = rmp_serde::to_vec(&world).unwrap();
+        let restored_mp: World = rmp_serde::from_slice(&mp).unwrap();
+        assert_eq!(*world.resource::<Physics>(), *restored_mp.resource::<Physics>());
     }
 
     /// 6c. An opaque type tagged with [`SkipSerialize`] is skipped, not errored, and is simply

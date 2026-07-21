@@ -132,10 +132,10 @@ pub fn derive_has_schema(input: TokenStream) -> TokenStream {
         quote! {
             {
                 let tds = #schema_mod::alloc::TypeDatas::default();
-                #(#add_derive_type_datas),*
+                #(#add_derive_type_datas)*
                 #(
                     tds.insert(#add_type_datas).unwrap();
-                ),*
+                )*
                 tds
             }
         }
