@@ -355,10 +355,12 @@ impl LuaEngine {
 
     /// Access the lua engine to run code on it.
     ///
-    /// wasm is single-threaded and the engine lives on the (only) main thread, so run the
-    /// closure directly. The native path parks the closure on the engine's dedicated
-    /// `ThreadExecutor`; on wasm nothing ever ticks that executor, so routing through it
-    /// deadlocks the first `exec` (found the hard way on the emscripten web build).
+    /// wasm runs the closure directly: the build is single-threaded, the engine lives on the
+    /// (only) main thread, and bevy_tasks is not linked on wasm at all (its wasm path is
+    /// wasm-bindgen-based, which emscripten cannot load — see Cargo.toml). Behaviorally this
+    /// matches what bevy_tasks' single-threaded pool would have done anyway: its
+    /// `scope_with_executor` ignores the thread executor and drives spawned tasks to completion
+    /// inline on a `LocalExecutor`.
     #[cfg(target_arch = "wasm32")]
     pub fn exec<'a, F: FnOnce(&mut Lua) + Send + 'a>(&self, f: F) {
         f(&mut self.state.lua.lock());
