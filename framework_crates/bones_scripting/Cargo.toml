@@ -11,10 +11,10 @@ categories.workspace    = true
 keywords.workspace      = true
 
 [dependencies]
+anyhow          = "1.0"
+ustr            = { workspace = true }
 async-channel   = "1.9"
-bevy_tasks      = { version = "0.11", features = ["multi-threaded"] }
-bones_asset     = { version = "0.4.0", path = "../bones_asset" }
-bones_lib       = { version = "0.4.0", path = "../bones_lib" }
+bones_ecs       = { version = "0.4.0", path = "../bones_ecs" }
 futures-lite    = { workspace = true }
 gc-arena        = "0.5"
 gc-arena-derive = "0.5"
@@ -23,10 +23,18 @@ piccolo         = "0.3"
 send_wrapper    = "0.6.0"
 tracing         = { workspace = true }
 
-# wasm32-unknown-unknown only — emscripten has no wasm-bindgen and the single-threaded drop
-# path no longer needs it anywhere.
-[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-wasm-bindgen-futures = "0.4"
+# Native only: the wasm build is single-threaded and bevy_tasks' wasm path links wasm-bindgen
+# shims that emscripten can never resolve (module hangs at dlopen).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bevy_tasks = { version = "0.11", features = ["multi-threaded"] }
+
+# The asset machinery (asset server, loaders, script assets by handle) is not available on
+# emscripten: bones_asset -> bevy_tasks/ehttp link wasm-bindgen shims whose imports emscripten
+# can never resolve — the wasm module then hangs at dlopen. Games on emscripten embed script
+# SOURCES directly (see wargame's ModeScripts) instead of loading assets.
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+bones_asset = { version = "0.4.0", path = "../bones_asset" }
+bones_lib   = { version = "0.4.0", path = "../bones_lib" }
 
 [dev-dependencies]
 piccolo = "0.3"

@@ -1,11 +1,25 @@
 use crate::prelude::*;
 
+#[cfg(not(target_arch = "wasm32"))]
 use bevy_tasks::{ComputeTaskPool, TaskPool, ThreadExecutor};
+#[cfg(not(target_os = "emscripten"))]
 use bones_asset::dashmap::mapref::one::{MappedRef, MappedRefMut};
+#[cfg(not(target_os = "emscripten"))]
 use bones_lib::ecs::utils::*;
 
 use parking_lot::Mutex;
 pub use piccolo;
+
+/// The executor handle the lua machinery hands around. Native: the engine's dedicated
+/// `bevy_tasks::ThreadExecutor`. wasm: a unit dummy — the build is single-threaded and pulling
+/// `bevy_tasks` in at all links its wasm-bindgen shims, whose `__wbindgen_placeholder__` imports
+/// are unresolvable on emscripten (the module then hangs at dlopen; found 2026-07-22).
+#[cfg(not(target_arch = "wasm32"))]
+pub type ScriptExecutor = Arc<ThreadExecutor<'static>>;
+/// See the native alias above.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Default)]
+pub struct ScriptExecutor;
 use piccolo::{
     compiler::{LineNumber, ParseError},
     registry::{Fetchable, Stashable},
@@ -28,6 +42,7 @@ pub use ext::*;
 pub mod bindings;
 
 /// Install the lua scripting plugin.
+#[cfg(not(target_os = "emscripten"))]
 pub fn lua_game_plugin(game: &mut Game) {
     // Register asset type.
     LuaScript::register_schema();
@@ -40,16 +55,19 @@ pub fn lua_game_plugin(game: &mut Game) {
 }
 
 /// A [`SessionPlugin] that will run the provided lua plugins
+#[cfg(not(target_os = "emscripten"))]
 pub struct LuaPluginLoaderSessionPlugin(pub Arc<Vec<Handle<LuaPlugin>>>);
 
 /// Resource containing the lua plugins that have been installed in this session.
 ///
 /// Excluded from [`World`] serialization via [`SkipSerialize`]: this is local runtime state
 /// (loaded-script handles) that every machine sets up itself, not simulation state.
+#[cfg(not(target_os = "emscripten"))]
 #[derive(HasSchema, Deref, DerefMut, Default, Clone)]
 #[type_data(SkipSerialize)]
 pub struct LuaPlugins(pub Arc<Vec<Handle<LuaPlugin>>>);
 
+#[cfg(not(target_os = "emscripten"))]
 impl SessionPlugin for LuaPluginLoaderSessionPlugin {
     fn install(self, session: &mut SessionBuilder) {
         session.insert_resource(LuaPlugins(self.0));
@@ -164,6 +182,7 @@ impl WorldRef {
             ("world", bindings::world::metatable as fn(Context) -> Table),
             ("components", bindings::components::metatable),
             ("resources", bindings::resources::metatable),
+            #[cfg(not(target_os = "emscripten"))]
             ("assets", bindings::assets::metatable),
         ] {
             let data = UserData::new_static(&ctx, self.clone());
@@ -185,7 +204,7 @@ impl WorldRef {
 pub struct LuaEngine {
     /// The thread-local task executor that is used to spawn any tasks that need access to the
     /// lua engine which can only be accessed on it's own thread.
-    executor: Arc<ThreadExecutor<'static>>,
+    executor: ScriptExecutor,
     /// The lua engine state container.
     state: Arc<SendWrapper<EngineState>>,
 }
@@ -198,6 +217,7 @@ struct EngineState {
     /// metatable, etc.
     data: LuaSingletons,
     /// Cache of the content IDs of loaded scripts, and their compiled lua closures.
+    #[cfg(not(target_os = "emscripten"))]
     compiled_scripts: Mutex<HashMap<Cid, StashedClosure>>,
 }
 
@@ -269,6 +289,7 @@ impl Default for EngineState {
         Self {
             lua: Mutex::new(lua),
             data: default(),
+            #[cfg(not(target_os = "emscripten"))]
             compiled_scripts: default(),
         }
     }
@@ -278,6 +299,7 @@ impl Default for LuaEngine {
     /// Initialize the Lua engine.
     fn default() -> Self {
         // Make sure the compute task pool is initialized
+        #[cfg(not(target_arch = "wasm32"))]
         ComputeTaskPool::init(TaskPool::new);
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -302,7 +324,7 @@ impl Default for LuaEngine {
         };
 
         #[cfg(target_arch = "wasm32")]
-        let executor = Arc::new(ThreadExecutor::new());
+        let executor = ScriptExecutor;
 
         LuaEngine {
             executor,
@@ -314,7 +336,7 @@ impl Default for LuaEngine {
 impl LuaEngine {
     /// The engine's dedicated executor — external stage runners (games embedding the lua
     /// machinery without `bones_lib::Session`) need it to call [`LuaPlugin::load`].
-    pub fn executor(&self) -> &Arc<ThreadExecutor<'static>> {
+    pub fn executor(&self) -> &ScriptExecutor {
         &self.executor
     }
 
@@ -343,6 +365,7 @@ impl LuaEngine {
     }
 
     /// Run a lua script as a system on the given world.
+    #[cfg(not(target_os = "emscripten"))]
     pub fn run_script_system(&self, world: &World, script: Handle<LuaScript>) {
         self.exec(|lua| {
             Frozen::<Freeze![&'freeze World]>::in_scope(world, |world| {

@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 use bevy_tasks::ThreadExecutor;
+
+use super::ScriptExecutor;
+#[cfg(not(target_os = "emscripten"))]
 use futures_lite::future::Boxed as BoxedFuture;
 use piccolo::{
     Callback, CallbackReturn, Closure, Context, Executor, StashedClosure, Table, UserData,
@@ -14,14 +18,19 @@ use crate::prelude::*;
 /// Lua scripts can be run easily with the [`LuaEngine`] resource.
 #[derive(HasSchema)]
 #[schema(no_clone, no_default)]
-#[type_data(asset_loader("lua", LuaScriptLoader))]
+#[cfg_attr(
+    not(target_os = "emscripten"),
+    type_data(asset_loader("lua", LuaScriptLoader))
+)]
 pub struct LuaScript {
     /// The lua source for the script.
     pub source: String,
 }
 
 /// Asset loader for [`LuaScript`].
+#[cfg(not(target_os = "emscripten"))]
 struct LuaScriptLoader;
+#[cfg(not(target_os = "emscripten"))]
 impl AssetLoader for LuaScriptLoader {
     fn load(&self, _ctx: AssetLoadCtx, bytes: &[u8]) -> BoxedFuture<anyhow::Result<SchemaBox>> {
         let bytes = bytes.to_vec();
@@ -40,7 +49,10 @@ impl AssetLoader for LuaScriptLoader {
 /// and run by the bones framework and [`LuaScript`] must be manually triggered by your systems.
 #[derive(HasSchema)]
 #[schema(no_clone, no_default)]
-#[type_data(asset_loader("plugin.lua", LuaPluginLoader))]
+#[cfg_attr(
+    not(target_os = "emscripten"),
+    type_data(asset_loader("plugin.lua", LuaPluginLoader))
+)]
 pub struct LuaPlugin {
     /// The lua source of the script.
     pub source: String,
@@ -78,7 +90,7 @@ impl LuaPlugin {
     /// Load the lua plugin's systems.
     pub fn load(
         &self,
-        executor: Arc<ThreadExecutor<'static>>,
+        executor: ScriptExecutor,
         lua: &mut piccolo::Lua,
     ) -> Result<(), anyhow::Error> {
         if !self.has_loaded() {
@@ -205,7 +217,7 @@ pub enum LuaPluginSystemsState {
     /// The systems have been loaded.
     Loaded {
         systems: SendWrapper<LuaPluginSystems>,
-        executor: Arc<ThreadExecutor<'static>>,
+        executor: ScriptExecutor,
     },
     /// The [`LuaPlugin`] has been dropped and it's systems have been unloaded.
     Unloaded,
@@ -243,7 +255,9 @@ pub struct LuaPluginSystems {
     pub core_stages: Vec<(CoreStage, StashedClosure)>,
 }
 
+#[cfg(not(target_os = "emscripten"))]
 struct LuaPluginLoader;
+#[cfg(not(target_os = "emscripten"))]
 impl AssetLoader for LuaPluginLoader {
     fn load(&self, _ctx: AssetLoadCtx, bytes: &[u8]) -> BoxedFuture<anyhow::Result<SchemaBox>> {
         let bytes = bytes.to_vec();

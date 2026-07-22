@@ -178,6 +178,11 @@ impl AssetIo for WebAssetIo {
         Box::pin(async move { Ok(default()) })
     }
 
+    // ehttp's wasm implementation is wasm-bindgen/web-sys — that only exists on
+    // wasm32-unknown-unknown. On emscripten, merely linking it leaves unresolvable
+    // `__wbindgen_placeholder__` imports in the module (it then hangs at dlopen), so the web
+    // loader is compiled out there (emscripten games use their own asset paths).
+    #[cfg(not(target_os = "emscripten"))]
     fn load_file(&self, loc: AssetLocRef) -> BoxedFuture<anyhow::Result<Vec<u8>>> {
         let loc = loc.to_owned();
         let asset_url = self.asset_url.clone();
@@ -203,6 +208,16 @@ impl AssetIo for WebAssetIo {
                 .with_context(|| format!("Could not download file: {url}"))?;
 
             Ok(result)
+        })
+    }
+
+    /// See the non-emscripten impl — URL loading is unsupported on emscripten.
+    #[cfg(target_os = "emscripten")]
+    fn load_file(&self, _loc: AssetLocRef) -> BoxedFuture<anyhow::Result<Vec<u8>>> {
+        Box::pin(async move {
+            Err(anyhow::format_err!(
+                "WebAssetIo is not supported on emscripten"
+            ))
         })
     }
 }

@@ -1,4 +1,8 @@
 use super::*;
+// Natively `Ustr` arrives via the bones_lib prelude; the emscripten build (no asset machinery,
+// ECS-only prelude) needs it directly.
+#[cfg(target_os = "emscripten")]
+use ustr::{ustr, Ustr};
 
 /// A type data that can be used to specify a custom metatable to use for the type when it is
 /// used in an [`EcsRef`] in the lua API.
@@ -98,6 +102,7 @@ pub enum EcsRefData {
     /// A component ref.
     Component(ComponentRef),
     /// An asset ref.
+    #[cfg(not(target_os = "emscripten"))]
     Asset(AssetRef),
     /// A free-standing ref, not stored in the ECS.
     // TODO: use a `Gc` pointer instead of an Rc maybe.
@@ -109,6 +114,7 @@ pub enum EcsRefBorrowKind<'a> {
     Resource(Ref<'a, Option<SchemaBox>>),
     Component(ComponentBorrow<'a>),
     Free(Ref<'a, SchemaBox>),
+    #[cfg(not(target_os = "emscripten"))]
     Asset(Option<MappedRef<'a, Cid, LoadedAsset, SchemaBox>>),
 }
 
@@ -166,6 +172,7 @@ impl EcsRefBorrowKind<'_> {
                     })
             }
             EcsRefBorrowKind::Free(f) => Ok(f.as_ref()),
+            #[cfg(not(target_os = "emscripten"))]
             EcsRefBorrowKind::Asset(a) => a
                 .as_ref()
                 .map(|x| x.as_ref())
@@ -191,6 +198,7 @@ pub enum EcsRefBorrowMutKind<'a> {
     Resource(RefMut<'a, Option<SchemaBox>>),
     Component(ComponentBorrowMut<'a>),
     Free(RefMut<'a, SchemaBox>),
+    #[cfg(not(target_os = "emscripten"))]
     Asset(Option<MappedRefMut<'a, Cid, LoadedAsset, SchemaBox>>),
 }
 
@@ -214,6 +222,7 @@ impl EcsRefBorrowMutKind<'_> {
                     })
             }
             EcsRefBorrowMutKind::Free(f) => Ok(f.as_mut()),
+            #[cfg(not(target_os = "emscripten"))]
             EcsRefBorrowMutKind::Asset(a) => a
                 .as_mut()
                 .map(|x| x.as_mut())
@@ -237,6 +246,7 @@ impl EcsRefData {
                     entity: componentref.entity,
                 })
             }
+            #[cfg(not(target_os = "emscripten"))]
             EcsRefData::Asset(assetref) => {
                 let b = assetref.server.try_get_untyped(assetref.handle);
                 EcsRefBorrowKind::Asset(b)
@@ -262,6 +272,7 @@ impl EcsRefData {
                     entity: componentref.entity,
                 })
             }
+            #[cfg(not(target_os = "emscripten"))]
             EcsRefData::Asset(assetref) => {
                 let b = assetref.server.try_get_untyped_mut(assetref.handle);
                 EcsRefBorrowMutKind::Asset(b)
@@ -284,6 +295,7 @@ pub struct ComponentRef {
 }
 
 /// A reference to an asset in an [`EcsRef`]
+#[cfg(not(target_os = "emscripten"))]
 #[derive(Clone)]
 pub struct AssetRef {
     /// The asset server handle.
@@ -377,7 +389,9 @@ pub fn metatable(ctx: Context) -> Table {
                         let newvalue_b = newvalue.borrow();
                         let newvalue_ref = newvalue_b.schema_ref()?;
 
-                        // If the current and new ref are asset handles
+                        // If the current and new ref are asset handles (no asset machinery
+                        // on emscripten — plain write there)
+                        #[cfg(not(target_os = "emscripten"))]
                         if this_ref
                             .schema()
                             .type_data
@@ -402,6 +416,8 @@ pub fn metatable(ctx: Context) -> Table {
                             // Attempt to write the new value
                             this_ref.write(newvalue_ref)?;
                         }
+                        #[cfg(target_os = "emscripten")]
+                        this_ref.write(newvalue_ref)?;
                     }
                     SchemaRefMutAccess::Primitive(p) => match (p, newvalue) {
                         (PrimitiveRefMut::Bool(b), Value::Boolean(newb)) => *b = newb,

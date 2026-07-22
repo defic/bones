@@ -26,7 +26,6 @@ async-channel   = "1.9"
 bevy_tasks      = "0.11"
 bs58            = "0.5"
 dashmap         = "5.5"
-ehttp           = "0.3"
 elsa            = "1.9"
 erased-serde    = "0.4"
 event-listener  = "4.0"
@@ -47,7 +46,12 @@ ustr            = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 notify = "6.0"
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+# ehttp/web-sys are wasm-bindgen-based: fine on native and wasm32-unknown-unknown, but on
+# emscripten they leave unresolvable __wbindgen_placeholder__ imports (module hangs at dlopen).
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+ehttp = "0.3"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 web-sys = { version = "0.3", features = ["console"] }
 
 [dev-dependencies]

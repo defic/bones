@@ -29,6 +29,7 @@ pub fn metatable(ctx: Context) -> Table {
                 let singletons = ctx.singletons();
                 let resources_metatable = singletons.get(ctx, super::resources::metatable);
                 let components_metatable = singletons.get(ctx, super::components::metatable);
+                #[cfg(not(target_os = "emscripten"))]
                 let assets_metatable = singletons.get(ctx, super::assets::metatable);
 
                 match key.as_bytes() {
@@ -42,6 +43,7 @@ pub fn metatable(ctx: Context) -> Table {
                         components.set_metatable(&ctx, Some(components_metatable));
                         stack.push_front(components.into());
                     }
+                    #[cfg(not(target_os = "emscripten"))]
                     b"assets" => {
                         let assets = UserData::new_static(&ctx, world.clone());
                         assets.set_metatable(&ctx, Some(assets_metatable));

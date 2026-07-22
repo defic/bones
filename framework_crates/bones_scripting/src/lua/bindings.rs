@@ -1,4 +1,4 @@
-use bones_lib::prelude::*;
+use crate::prelude::*;
 use gc_arena_derive::Collect;
 use piccolo::{
     self as lua, meta_ops, meta_ops::MetaResult, BoxSequence, Callback, CallbackReturn, Context,
@@ -7,6 +7,7 @@ use piccolo::{
 
 use super::*;
 
+#[cfg(not(target_os = "emscripten"))]
 pub mod assets;
 pub mod components;
 pub mod entities;

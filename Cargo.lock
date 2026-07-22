@@ -1593,9 +1593,11 @@ dependencies = [
 name = "bones_scripting"
 version = "0.4.0"
 dependencies = [
+ "anyhow",
  "async-channel",
  "bevy_tasks 0.11.3",
  "bones_asset",
+ "bones_ecs",
  "bones_lib",
  "futures-lite 2.5.0",
  "gc-arena",
@@ -1604,7 +1606,7 @@ dependencies = [
  "piccolo",
  "send_wrapper",
  "tracing",
- "wasm-bindgen-futures",
+ "ustr",
 ]
 
 [[package]]
