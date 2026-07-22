@@ -56,10 +56,13 @@ impl Drop for LuaPlugin {
             LuaPluginSystemsState::Loaded { systems, executor } => {
                 #[cfg(not(target_arch = "wasm32"))]
                 executor.spawn(async move { drop(systems) }).detach();
+                // wasm is single-threaded: the SendWrapper was created on this thread, so a
+                // direct drop is safe (and wasm-bindgen-futures does not exist on emscripten).
                 #[cfg(target_arch = "wasm32")]
-                wasm_bindgen_futures::spawn_local(async move { drop(systems) });
-                #[cfg(target_arch = "wasm32")]
-                let _ = executor;
+                {
+                    drop(systems);
+                    let _ = executor;
+                }
             }
             LuaPluginSystemsState::Unloaded => (),
         }

@@ -319,6 +319,7 @@ impl LuaEngine {
     }
 
     /// Access the lua engine to run code on it.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn exec<'a, F: FnOnce(&mut Lua) + Send + 'a>(&self, f: F) {
         let pool = ComputeTaskPool::get();
 
@@ -328,6 +329,17 @@ impl LuaEngine {
                 f(&mut self.state.lua.lock());
             });
         });
+    }
+
+    /// Access the lua engine to run code on it.
+    ///
+    /// wasm is single-threaded and the engine lives on the (only) main thread, so run the
+    /// closure directly. The native path parks the closure on the engine's dedicated
+    /// `ThreadExecutor`; on wasm nothing ever ticks that executor, so routing through it
+    /// deadlocks the first `exec` (found the hard way on the emscripten web build).
+    #[cfg(target_arch = "wasm32")]
+    pub fn exec<'a, F: FnOnce(&mut Lua) + Send + 'a>(&self, f: F) {
+        f(&mut self.state.lua.lock());
     }
 
     /// Run a lua script as a system on the given world.
