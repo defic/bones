@@ -333,12 +333,21 @@ impl<'ptr> SchemaRefAccess<'ptr> {
     }
 
     /// Get field with the given index.
+    ///
+    /// For a [`SchemaVec`], a numeric [`FieldIdx::Idx`] resolves to the element at that index —
+    /// this is what lets reflection paths (and Lua scripts) address `some_vec.0.field`.
     pub fn field<'a, I: Into<FieldIdx<'a>>>(self, field_idx: I) -> Option<Self> {
         let field_idx = field_idx.into();
         match self {
             SchemaRefAccess::Struct(s) => s.field(field_idx),
-            SchemaRefAccess::Vec(_)
-            | SchemaRefAccess::Enum(_)
+            SchemaRefAccess::Vec(v) => match field_idx {
+                FieldIdx::Idx(idx) => {
+                    let vec: &SchemaVec = &v;
+                    Some(vec.get_ref(idx)?.access())
+                }
+                FieldIdx::Name(_) => None,
+            },
+            SchemaRefAccess::Enum(_)
             | SchemaRefAccess::Map(_)
             | SchemaRefAccess::Primitive(_) => None,
         }
@@ -915,6 +924,13 @@ pub struct SchemaVecMutAccess<'a> {
 }
 
 impl<'a> SchemaVecMutAccess<'a> {
+    /// Consume the access and return a mutable ref to the element at `idx`, carrying the full
+    /// borrow lifetime (unlike going through `Deref`, which reborrows).
+    pub fn into_element_ref_mut(self, idx: usize) -> Option<SchemaRefMut<'a>> {
+        let vec: &'a mut SchemaVec = self.vec;
+        vec.get_ref_mut(idx)
+    }
+
     /// Convert back to a [`SchemaRefMut`]
     pub fn as_mut(self) -> SchemaRefMut<'a> {
         // SOUND: we are taking ownership of self and dropping the reference that aliases,
@@ -1024,8 +1040,18 @@ impl<'pointer> SchemaRefMutAccess<'pointer> {
             SchemaRefMutAccess::Struct(s) => {
                 s.into_field(field_idx).map_err(SchemaRefMutAccess::Struct)
             }
-            other @ (SchemaRefMutAccess::Vec(_)
-            | SchemaRefMutAccess::Enum(_)
+            SchemaRefMutAccess::Vec(v) => match field_idx {
+                // A numeric index on a vec resolves to that element (mirrors the shared-ref
+                // `field`; lets reflection paths and Lua address `some_vec.0.field`). An
+                // out-of-range index cannot return the consumed access — fail loudly instead of
+                // silently pointing elsewhere.
+                FieldIdx::Idx(idx) => match v.into_element_ref_mut(idx) {
+                    Some(elem) => Ok(elem.into_access_mut()),
+                    None => panic!("vec index {idx} out of bounds in schema field path"),
+                },
+                FieldIdx::Name(_) => panic!("cannot access a vec element by name"),
+            },
+            other @ (SchemaRefMutAccess::Enum(_)
             | SchemaRefMutAccess::Map(_)
             | SchemaRefMutAccess::Primitive(_)) => Err(other),
         }
