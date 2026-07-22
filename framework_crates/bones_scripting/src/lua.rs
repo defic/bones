@@ -16,8 +16,8 @@ use send_wrapper::SendWrapper;
 use std::{any::Any, rc::Rc, sync::Arc};
 
 #[macro_use]
-mod freeze;
-use freeze::*;
+pub mod freeze;
+pub use freeze::*;
 
 mod asset;
 pub use asset::*;
@@ -131,7 +131,7 @@ impl SessionPlugin for LuaPluginLoaderSessionPlugin {
 ///
 // This type can be converted into lua userdata for accessing the world from lua.
 #[derive(Deref, DerefMut, Clone)]
-pub struct WorldRef(Frozen<Freeze![&'freeze World]>);
+pub struct WorldRef(pub Frozen<Freeze![&'freeze World]>);
 impl Default for WorldRef {
     fn default() -> Self {
         Self(Frozen::new())
@@ -154,8 +154,9 @@ impl WorldRef {
         data
     }
 
-    /// Add this world
-    fn add_to_env<'gc>(&self, ctx: Context<'gc>, env: Table<'gc>) {
+    /// Add this world to the lua environment (globals + env userdata for world/components/
+    /// resources/assets) — public so external stage runners can replicate the session plugin.
+    pub fn add_to_env<'gc>(&self, ctx: Context<'gc>, env: Table<'gc>) {
         ctx.globals()
             .set(ctx, "world", self.clone().into_userdata(ctx))
             .unwrap();
@@ -222,7 +223,9 @@ impl LuaSingletons {
     /// Fetch a lua singleton, initializing it if it has not yet been created.
     ///
     /// The singleton is defined by a function pointer that returns a stashable value.
-    fn get<
+    /// Public so external stage runners (embedding the lua machinery without
+    /// `bones_lib::Session`) can fetch the shared environment/metatables.
+    pub fn get<
         'gc,
         S: Fetchable<'gc, Fetched = T> + 'static,
         T: Stashable<'gc, Stashed = S> + Clone + Copy + 'gc,
@@ -309,6 +312,12 @@ impl Default for LuaEngine {
 }
 
 impl LuaEngine {
+    /// The engine's dedicated executor — external stage runners (games embedding the lua
+    /// machinery without `bones_lib::Session`) need it to call [`LuaPlugin::load`].
+    pub fn executor(&self) -> &Arc<ThreadExecutor<'static>> {
+        &self.executor
+    }
+
     /// Access the lua engine to run code on it.
     pub fn exec<'a, F: FnOnce(&mut Lua) + Send + 'a>(&self, f: F) {
         let pool = ComputeTaskPool::get();
