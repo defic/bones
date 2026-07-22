@@ -304,6 +304,31 @@ pub struct AssetRef {
     pub handle: UntypedHandle,
 }
 
+/// `vec:push()` — append a default-initialized element to a reflected schema vec and return an
+/// [`EcsRef`] to it (`local row = list:push(); row.field = …`).
+fn vec_push_callback(ctx: Context) -> Callback {
+    Callback::from_fn(&ctx, move |ctx, _fuel, mut stack| {
+        let this: &EcsRef = stack.consume(ctx)?;
+        let idx = {
+            let mut b = this.borrow_mut();
+            let r = b.schema_ref_mut()?;
+            match r.into_access_mut() {
+                SchemaRefMutAccess::Vec(mut v) => {
+                    let vec: &mut SchemaVec = &mut *v;
+                    let elem = SchemaBox::default(vec.schema());
+                    vec.push_box(elem);
+                    vec.len() - 1
+                }
+                _ => return Err(anyhow::format_err!("push() on a non-vec ref").into()),
+            }
+        };
+        let mut elem = this.clone();
+        elem.path = ustr(&format!("{}.{idx}", this.path));
+        stack.push_front(elem.into_value(ctx));
+        Ok(CallbackReturn::Return)
+    })
+}
+
 pub fn metatable(ctx: Context) -> Table {
     let metatable = Table::new(&ctx);
 
@@ -332,6 +357,30 @@ pub fn metatable(ctx: Context) -> Table {
             "__index",
             Callback::from_fn(&ctx, move |ctx, _fuel, mut stack| {
                 let (this, key): (&EcsRef, lua::Value) = stack.consume(ctx)?;
+
+                // Vec sugar: when the CURRENT ref is a schema vec, `len` and `push` are virtual
+                // members (vecs have no named fields, so nothing can collide). `vec:push()`
+                // appends a default-initialized element and returns a ref to it — together with
+                // numeric indexing this lets scripts grow reflected vecs without Rust helpers.
+                if let Value::String(keystr) = &key {
+                    let kb = keystr.as_bytes();
+                    if kb == b"len" || kb == b"push" {
+                        let b = this.borrow();
+                        if let Ok(r) = b.schema_ref() {
+                            if let SchemaRefAccess::Vec(v) = r.access() {
+                                if kb == b"len" {
+                                    let vec: &SchemaVec = &v;
+                                    stack.push_front(Value::Integer(vec.len() as i64));
+                                    return Ok(CallbackReturn::Return);
+                                }
+                                drop(b);
+                                let push_cb = ctx.singletons().get(ctx, vec_push_callback);
+                                stack.push_front(push_cb.into());
+                                return Ok(CallbackReturn::Return);
+                            }
+                        }
+                    }
+                }
 
                 let mut newref = this.clone();
                 newref.path = ustr(&format!("{}.{key}", this.path));
