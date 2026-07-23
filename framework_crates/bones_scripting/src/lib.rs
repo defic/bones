@@ -1,3 +1,4 @@
+pub mod embedded;
 pub mod lua;
 
 #[cfg(not(target_os = "emscripten"))]
