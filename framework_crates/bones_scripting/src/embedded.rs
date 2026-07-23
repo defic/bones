@@ -28,78 +28,96 @@ use crate::lua::{
 #[type_data(SkipSerialize)]
 pub struct ScriptPlugins(pub Arc<Vec<Arc<LuaPlugin>>>);
 
-enum SourceChoice {
-    Default,
-    Installed(String),
-}
-
 struct SourceSlot {
-    pending: SourceChoice,
-    active: Option<Arc<String>>,
+    /// The ORDERED sources pending for the next session. `None` = "use the game's default";
+    /// `Some(vec)` = exactly these (each file becomes its own plugin, in order — scripts
+    /// self-schedule onto stages, files are never flattened together).
+    pending: Option<Vec<String>>,
+    active: Option<Arc<Vec<String>>>,
     consumed: bool,
 }
 
 fn slot() -> &'static Mutex<SourceSlot> {
     static SLOT: OnceLock<Mutex<SourceSlot>> = OnceLock::new();
-    SLOT.get_or_init(|| {
-        Mutex::new(SourceSlot { pending: SourceChoice::Default, active: None, consumed: false })
-    })
+    SLOT.get_or_init(|| Mutex::new(SourceSlot { pending: None, active: None, consumed: false }))
 }
 
-/// Install runtime script source for the NEXT session. Returns `false` if a session already
-/// baked the current pending choice (the install came too late — surface it, peers may
-/// diverge). Non-UTF-8 bytes are rejected.
-pub fn set_active_source(bytes: Vec<u8>) -> bool {
+/// Append one runtime script source for the NEXT session (call once per file, in run order —
+/// the client prefetch and the server boot both install files individually so each stays its
+/// own cacheable, content-addressed asset). Returns `false` if a session already baked the
+/// pending set (the install came too late — surface it, peers may diverge). Non-UTF-8 rejected.
+pub fn push_active_source(bytes: Vec<u8>) -> bool {
     let Ok(source) = String::from_utf8(bytes) else {
-        tracing::error!("set_active_source: script asset is not UTF-8 — ignoring");
+        tracing::error!("push_active_source: script asset is not UTF-8 — ignoring");
         return false;
     };
     let mut slot = slot().lock().unwrap();
     let in_time = !slot.consumed;
-    slot.pending = SourceChoice::Installed(source);
-    slot.consumed = false;
+    if slot.consumed {
+        // A stale pending set must not leak into the next install sequence.
+        slot.pending = None;
+        slot.consumed = false;
+    }
+    slot.pending.get_or_insert_with(Vec::new).push(source);
     in_time
+}
+
+/// Replace the pending set with exactly one source (single-script convenience).
+pub fn set_active_source(bytes: Vec<u8>) -> bool {
+    {
+        let mut slot = slot().lock().unwrap();
+        slot.pending = None;
+        slot.consumed = false;
+    }
+    push_active_source(bytes)
 }
 
 /// Back to the game's compiled-in default source for the NEXT session.
 pub fn reset_active_source() {
     let mut slot = slot().lock().unwrap();
-    slot.pending = SourceChoice::Default;
+    slot.pending = None;
     slot.consumed = false;
 }
 
-/// Commit the pending source choice for this session (`default_source` when none installed) and
-/// build the session's [`ScriptPlugins`]. Also installs (once per process) the lua type data the
-/// stock session plugin would have registered — without it `Entities` has no `iter_with`
-/// metatable and every script query fails.
+/// Commit the pending source set for this session (`default_source` when none installed) and
+/// build the session's [`ScriptPlugins`] — one plugin per file, in install order. Also installs
+/// (once per process) the lua type data the stock session plugin would have registered —
+/// without it `Entities` has no `iter_with` metatable and every script query fails.
 pub fn plugins_for_session(default_source: &str) -> ScriptPlugins {
     static LUA_TYPEDATA: Once = Once::new();
     LUA_TYPEDATA.call_once(bindings::register_lua_typedata);
 
-    let source = {
+    let sources = {
         let mut slot = slot().lock().unwrap();
         if slot.consumed {
             if let Some(active) = &slot.active {
                 active.clone()
             } else {
-                let s = Arc::new(default_source.to_string());
+                let s = Arc::new(vec![default_source.to_string()]);
                 slot.active = Some(s.clone());
                 s
             }
         } else {
-            let s = Arc::new(match &slot.pending {
-                SourceChoice::Installed(source) => source.clone(),
-                SourceChoice::Default => default_source.to_string(),
+            let s = Arc::new(match slot.pending.take() {
+                Some(sources) if !sources.is_empty() => sources,
+                _ => vec![default_source.to_string()],
             });
             slot.active = Some(s.clone());
             slot.consumed = true;
             s
         }
     };
-    ScriptPlugins(Arc::new(vec![Arc::new(LuaPlugin {
-        source: (*source).clone(),
-        systems: Arc::new(AtomicCell::new(Default::default())),
-    })]))
+    ScriptPlugins(Arc::new(
+        sources
+            .iter()
+            .map(|source| {
+                Arc::new(LuaPlugin {
+                    source: source.clone(),
+                    systems: Arc::new(AtomicCell::new(Default::default())),
+                })
+            })
+            .collect(),
+    ))
 }
 
 /// Register a Lua runner system at the END of every core stage of `builder` (after that stage's
