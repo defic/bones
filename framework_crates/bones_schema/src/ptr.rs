@@ -347,9 +347,10 @@ impl<'ptr> SchemaRefAccess<'ptr> {
                 }
                 FieldIdx::Name(_) => None,
             },
-            SchemaRefAccess::Enum(_)
-            | SchemaRefAccess::Map(_)
-            | SchemaRefAccess::Primitive(_) => None,
+            // An enum ref resolves fields through its CURRENT variant's payload — reflection
+            // paths (and Lua) read/write `some_enum.field` without naming the variant.
+            SchemaRefAccess::Enum(e) => e.value().field(field_idx),
+            SchemaRefAccess::Map(_) | SchemaRefAccess::Primitive(_) => None,
         }
     }
 
@@ -1051,9 +1052,13 @@ impl<'pointer> SchemaRefMutAccess<'pointer> {
                 },
                 FieldIdx::Name(_) => panic!("cannot access a vec element by name"),
             },
-            other @ (SchemaRefMutAccess::Enum(_)
-            | SchemaRefMutAccess::Map(_)
-            | SchemaRefMutAccess::Primitive(_)) => Err(other),
+            // An enum ref resolves fields through its CURRENT variant's payload (mirrors the
+            // shared-ref `field`). A miss returns the enum access unchanged.
+            SchemaRefMutAccess::Enum(e) => {
+                let value = e.value();
+                value.into_field(field_idx).map_err(|_| SchemaRefMutAccess::Enum(e))
+            }
+            other @ (SchemaRefMutAccess::Map(_) | SchemaRefMutAccess::Primitive(_)) => Err(other),
         }
     }
 
@@ -1261,6 +1266,74 @@ impl<'a> EnumRefMutAccess<'a> {
             schema,
             _phantom: PhantomData,
         })
+    }
+
+    /// Switch the selected variant by index: drop the old payload, write the tag, and
+    /// default-initialize the new payload FIELD BY FIELD — variant schemas themselves carry no
+    /// `default_fn`/`drop_fn` (see the derive), but their fields' schemas do.
+    ///
+    /// No-op when `idx` is already selected.
+    ///
+    /// # Panics
+    /// Panics if `idx` is out of range, or if a target-variant field's schema has no
+    /// `default_fn` (i.e. the field type doesn't implement `Default` — such variants can't be
+    /// constructed reflectively).
+    pub fn set_variant_idx(&mut self, idx: u32) {
+        let info = self.info();
+        assert!(
+            (idx as usize) < info.variants.len(),
+            "set_variant_idx: variant {idx} out of range ({} variants)",
+            info.variants.len()
+        );
+        if idx == self.variant_idx() {
+            return;
+        }
+        let value_offset = self.0.schema.field_offsets()[0].1;
+        // Drop the old payload, one field at a time (each field's own drop_fn drops it fully).
+        let old = &info.variants[self.variant_idx() as usize];
+        for (i, (_, off)) in old.schema.field_offsets().iter().enumerate() {
+            let field = &old.schema.kind.as_struct().unwrap().fields[i];
+            if let Some(drop_fn) = &field.schema.drop_fn {
+                unsafe {
+                    (drop_fn.get())(self.0.ptr.as_ptr().add(value_offset + off).cast());
+                }
+            }
+        }
+        // Write the tag.
+        unsafe {
+            match info.tag_type {
+                EnumTagType::U8 => self.0.as_ptr().cast::<u8>().write(idx as u8),
+                EnumTagType::U16 => self.0.as_ptr().cast::<u16>().write(idx as u16),
+                EnumTagType::U32 => self.0.as_ptr().cast::<u32>().write(idx),
+            }
+        }
+        // Default-initialize the new payload, one field at a time.
+        let new = &info.variants[idx as usize];
+        for (i, (_, off)) in new.schema.field_offsets().iter().enumerate() {
+            let field = &new.schema.kind.as_struct().unwrap().fields[i];
+            let default_fn = field.schema.default_fn.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "set_variant_idx: field {i} of variant `{}` has no default_fn",
+                    new.name
+                )
+            });
+            unsafe {
+                (default_fn.get())(self.0.ptr.as_ptr().add(value_offset + off).cast());
+            }
+        }
+    }
+
+    /// Switch the selected variant by name. Returns `false` (without touching the value) when no
+    /// variant has this name. Panics like [`set_variant_idx`][Self::set_variant_idx].
+    pub fn set_variant(&mut self, name: &str) -> bool {
+        let info = self.info();
+        match info.variants.iter().position(|v| v.name.as_ref() == name) {
+            Some(i) => {
+                self.set_variant_idx(i as u32);
+                true
+            }
+            None => false,
+        }
     }
 }
 

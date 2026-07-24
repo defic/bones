@@ -329,6 +329,56 @@ fn vec_push_callback(ctx: Context) -> Callback {
     })
 }
 
+/// `enum_ref:variant()` — name of the currently selected variant; `enum_ref:variant("Name")` —
+/// switch to that variant (payload default-initialized) and return the ref for chaining:
+/// `local gi = q.inputs:push():variant("Collect"); gi.player = …`.
+fn enum_variant_callback(ctx: Context) -> Callback {
+    Callback::from_fn(&ctx, move |ctx, _fuel, mut stack| {
+        let (this, name): (&EcsRef, Option<piccolo::String>) = stack.consume(ctx)?;
+        match name {
+            None => {
+                let b = this.borrow();
+                let r = b.schema_ref()?;
+                match r.access() {
+                    SchemaRefAccess::Enum(e) => {
+                        let name = e.variant_name();
+                        stack.push_front(Value::String(piccolo::String::from_slice(&ctx, name)));
+                    }
+                    _ => return Err(anyhow::format_err!("variant() on a non-enum ref").into()),
+                }
+            }
+            Some(name) => {
+                let name = std::str::from_utf8(name.as_bytes())
+                    .map_err(|_| anyhow::format_err!("variant name must be utf-8"))?
+                    .to_string();
+                {
+                    let mut b = this.borrow_mut();
+                    let r = b.schema_ref_mut()?;
+                    match r.into_access_mut() {
+                        SchemaRefMutAccess::Enum(mut e) => {
+                            if !e.set_variant(&name) {
+                                return Err(anyhow::format_err!(
+                                    "variant(\"{name}\"): no such variant on {}",
+                                    e.schema().full_name
+                                )
+                                .into());
+                            }
+                        }
+                        _ => {
+                            return Err(
+                                anyhow::format_err!("variant() on a non-enum ref").into()
+                            )
+                        }
+                    }
+                }
+                let this = this.clone();
+                stack.push_front(this.into_value(ctx));
+            }
+        }
+        Ok(CallbackReturn::Return)
+    })
+}
+
 pub fn metatable(ctx: Context) -> Table {
     let metatable = Table::new(&ctx);
 
@@ -376,6 +426,21 @@ pub fn metatable(ctx: Context) -> Table {
                                 drop(b);
                                 let push_cb = ctx.singletons().get(ctx, vec_push_callback);
                                 stack.push_front(push_cb.into());
+                                return Ok(CallbackReturn::Return);
+                            }
+                        }
+                    }
+                    // Enum sugar: `variant` is a virtual member on enum refs (an enum's fields
+                    // are its current variant's — a payload field named "variant" would shadow
+                    // this, so don't name one that). Read: current variant name. Write:
+                    // `ref:variant("Name")` switches variant and returns the ref for chaining.
+                    if kb == b"variant" {
+                        let b = this.borrow();
+                        if let Ok(r) = b.schema_ref() {
+                            if matches!(r.access(), SchemaRefAccess::Enum(_)) {
+                                drop(b);
+                                let cb = ctx.singletons().get(ctx, enum_variant_callback);
+                                stack.push_front(cb.into());
                                 return Ok(CallbackReturn::Return);
                             }
                         }
