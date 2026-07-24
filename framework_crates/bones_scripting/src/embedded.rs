@@ -218,3 +218,70 @@ pub fn install_lua_runners(builder: &mut SystemStagesBuilder) {
         );
     }
 }
+
+/// Register the CONFIRMED-phase Lua runner: appended after the host's resolve system(s), it
+/// executes every plugin's `add_resolve_system` closures once per authoritative batch, in
+/// plugin order — post-application, so hooks see the batch's effects (joins applied, kills
+/// logged) atomically. Effects are confirmed-tick-late and never mispredicted.
+///
+/// v1 contract: resolve hooks read/write reflected state directly; outbound channels the game
+/// drains after its SIMULATE stages (e.g. a damage queue) are NOT re-drained here — pushing
+/// into them from a resolve hook does nothing until the game adds a resolve-side pipeline.
+pub fn install_resolve_lua_runner(builder: &mut SystemStagesBuilder) {
+    builder.add_system_to_stage(
+        CoreStage::Last,
+        move |engine: Res<LuaEngine>, scripts: Res<ScriptPlugins>, world: &World| {
+            // Dormant fast path: no plugin has resolve hooks (or still needs loading) → no VM hop.
+            let has_work = scripts.0.iter().any(|p| {
+                let systems = p.systems.borrow();
+                match &*systems {
+                    LuaPluginSystemsState::NotLoaded => true,
+                    LuaPluginSystemsState::Loaded { .. } => {
+                        !systems.as_loaded().resolve_systems.is_empty()
+                    }
+                    LuaPluginSystemsState::Unloaded => false,
+                }
+            });
+            if !has_work {
+                return;
+            }
+            engine.exec(|lua| {
+                Frozen::<Freeze![&'freeze World]>::in_scope(world, |world| {
+                    lua.enter(|ctx| {
+                        let env = ctx.singletons().get(ctx, bindings::env);
+                        let worldref = WorldRef(world);
+                        worldref.add_to_env(ctx, env);
+                    });
+
+                    for plugin in scripts.0.iter() {
+                        // Lazy-load here too: a resolve batch can arrive before the first
+                        // simulate tick (server boot joins).
+                        if !plugin.has_loaded() {
+                            if let Err(e) = plugin.load(engine.executor().clone(), lua) {
+                                eprintln!("lua plugin load error: {e}");
+                                tracing::error!("Error loading lua plugin: {e}");
+                            }
+                        }
+                        if matches!(&*plugin.systems.borrow(), LuaPluginSystemsState::NotLoaded) {
+                            continue;
+                        }
+                        let systems = plugin.systems.borrow();
+                        let systems = systems.as_loaded();
+                        for closure in &systems.resolve_systems {
+                            let executor = lua.enter(|ctx| {
+                                let closure = ctx.registry().fetch(closure);
+                                let ex =
+                                    crate::lua::piccolo::Executor::start(ctx, closure.into(), ());
+                                ctx.registry().stash(&ctx, ex)
+                            });
+                            if let Err(e) = lua.execute::<()>(&executor) {
+                                eprintln!("lua resolve system error: {e}");
+                                tracing::error!("Error running lua resolve system: {e}");
+                            }
+                        }
+                    }
+                })
+            });
+        },
+    );
+}

@@ -132,7 +132,7 @@ fn session_metatable(ctx: Context) -> Table {
             "__tostring",
             Callback::from_fn(&ctx, |ctx, _fuel, mut stack| {
                 stack.push_front(
-                    piccolo::String::from_static(&ctx, "Session { add_system_to_stage }").into(),
+                    piccolo::String::from_static(&ctx, "Session { add_system_to_stage, add_startup_system, add_resolve_system }").into(),
                 );
                 Ok(CallbackReturn::Return)
             }),
@@ -157,6 +157,21 @@ fn session_metatable(ctx: Context) -> Table {
                 .as_loaded_mut()
                 .startup
                 .push((false, ctx.registry().stash(&ctx, closure)));
+
+            Ok(CallbackReturn::Return)
+        }),
+    );
+    let add_resolve_system_callback = ctx.registry().stash(
+        &ctx,
+        Callback::from_fn(&ctx, move |ctx, _fuel, mut stack| {
+            let (this, closure): (UserData, Closure) = stack.consume(ctx)?;
+            let this = this.downcast_static::<LuaPluginSystemsCell>()?;
+
+            let mut systems = this.borrow_mut();
+            systems
+                .as_loaded_mut()
+                .resolve_systems
+                .push(ctx.registry().stash(&ctx, closure));
 
             Ok(CallbackReturn::Return)
         }),
@@ -193,6 +208,9 @@ fn session_metatable(ctx: Context) -> Table {
                     }
                     b"add_startup_system" => {
                         stack.push_front(ctx.registry().fetch(&add_startup_system_callback).into());
+                    }
+                    b"add_resolve_system" => {
+                        stack.push_front(ctx.registry().fetch(&add_resolve_system_callback).into());
                     }
                     _ => (),
                 }
@@ -253,6 +271,9 @@ pub struct LuaPluginSystems {
     pub startup: Vec<(bool, StashedClosure)>,
     /// Systems that run in the core stages.
     pub core_stages: Vec<(CoreStage, StashedClosure)>,
+    /// Systems that run in the CONFIRMED resolve phase (external-netcode games): once per
+    /// authoritative batch, post-application — never predicted, never rolled back visibly.
+    pub resolve_systems: Vec<StashedClosure>,
 }
 
 #[cfg(not(target_os = "emscripten"))]
