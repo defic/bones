@@ -15,6 +15,67 @@ use crate::prelude::*;
 #[type_data(SkipSerialize)]
 pub struct CurrentSystemStage(pub Ulid);
 
+/// One system's accumulated wall-clock timing (see [`StageTimings`]).
+#[derive(Clone, Debug)]
+pub struct TimingRow {
+    /// Stage name the system ran in.
+    pub stage: String,
+    /// System name (the fn's type name for Rust systems; runners may record synthetic names
+    /// like `lua:<script-label>`).
+    pub system: String,
+    /// Calls since the last [`StageTimings::take_rows`].
+    pub calls: u64,
+    /// Total nanoseconds since the last take.
+    pub sum_ns: u64,
+    /// Worst single call since the last take.
+    pub max_ns: u64,
+}
+
+/// Opt-in per-system wall-clock timing. Insert one with `enabled: true` and every
+/// [`SimpleSystemStage`] run records each system's duration under `(stage, system)`;
+/// instrumented runners (e.g. the Lua plugin runners) add their own finer-grained rows.
+/// Absent or disabled = the stage loop takes the untimed path (zero clock reads).
+///
+/// A sampler (e.g. a server's stats publisher) calls [`take_rows`][Self::take_rows]
+/// periodically and derives `avg = sum_ns / calls`.
+///
+/// [`SkipSerialize`]: diagnostics, not game state — never part of a canonical snapshot.
+#[derive(Clone, HasSchema, Default)]
+#[schema(opaque)]
+#[type_data(SkipSerialize)]
+pub struct StageTimings {
+    /// Master switch — leave `false` (or don't insert the resource) to pay nothing.
+    pub enabled: bool,
+    /// Accumulated rows since the last take, in first-seen order.
+    pub rows: Vec<TimingRow>,
+}
+
+impl StageTimings {
+    /// Accumulate one call's duration under `(stage, system)`.
+    pub fn record(&mut self, stage: &str, system: &str, ns: u64) {
+        if let Some(row) =
+            self.rows.iter_mut().find(|r| r.stage == stage && r.system == system)
+        {
+            row.calls += 1;
+            row.sum_ns += ns;
+            row.max_ns = row.max_ns.max(ns);
+        } else {
+            self.rows.push(TimingRow {
+                stage: stage.to_string(),
+                system: system.to_string(),
+                calls: 1,
+                sum_ns: ns,
+                max_ns: ns,
+            });
+        }
+    }
+
+    /// Snapshot and reset the accumulated rows (the sampler's read).
+    pub fn take_rows(&mut self) -> Vec<TimingRow> {
+        std::mem::take(&mut self.rows)
+    }
+}
+
 /// Builder for [`SystemStages`]. It is immutable once created,
 pub struct SystemStagesBuilder {
     /// The stages in the collection, in the order that they will be run.
@@ -412,9 +473,27 @@ impl SystemStage for SimpleSystemStage {
     }
 
     fn run(&mut self, world: &World) {
-        // Run the systems
-        for system in &mut self.systems {
-            system.run(world, ());
+        // Run the systems. Timed path only when an enabled StageTimings resource is present —
+        // the borrow is re-taken AFTER each system runs (never held across one) so a system may
+        // itself borrow the resource.
+        let timing_on = world
+            .resources
+            .get::<StageTimings>()
+            .map(|t| t.enabled)
+            .unwrap_or(false);
+        if timing_on {
+            for system in &mut self.systems {
+                let t0 = std::time::Instant::now();
+                system.run(world, ());
+                let ns = t0.elapsed().as_nanos() as u64;
+                if let Some(mut t) = world.resources.get_mut::<StageTimings>() {
+                    t.record(&self.name, system.name(), ns);
+                }
+            }
+        } else {
+            for system in &mut self.systems {
+                system.run(world, ());
+            }
         }
 
         // Drain the command queue

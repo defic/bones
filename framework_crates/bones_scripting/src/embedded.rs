@@ -22,18 +22,23 @@ use crate::lua::{
 
 /// The loaded Lua plugins for a session, in registration order. Shared `Arc` so rollback clones
 /// reuse the same compiled plugins (their `systems` cell is shared — startup closures run once
-/// per session, not once per clone). `SkipSerialize`: runtime state every peer builds itself.
+/// per session, not once per clone). `labels` parallels `plugins` (same order) — human names
+/// for diagnostics like the per-script [`StageTimings`] rows. `SkipSerialize`: runtime state
+/// every peer builds itself.
 #[derive(HasSchema, Clone, Default)]
 #[schema(opaque)]
 #[type_data(SkipSerialize)]
-pub struct ScriptPlugins(pub Arc<Vec<Arc<LuaPlugin>>>);
+pub struct ScriptPlugins {
+    pub plugins: Arc<Vec<Arc<LuaPlugin>>>,
+    pub labels: Arc<Vec<String>>,
+}
 
 struct SourceSlot {
-    /// The ORDERED sources pending for the next session. `None` = "use the game's default";
-    /// `Some(vec)` = exactly these (each file becomes its own plugin, in order — scripts
-    /// self-schedule onto stages, files are never flattened together).
-    pending: Option<Vec<String>>,
-    active: Option<Arc<Vec<String>>>,
+    /// The ORDERED `(source, label)`s pending for the next session. `None` = "use the game's
+    /// default"; `Some(vec)` = exactly these (each file becomes its own plugin, in order —
+    /// scripts self-schedule onto stages, files are never flattened together).
+    pending: Option<Vec<(String, String)>>,
+    active: Option<Arc<Vec<(String, String)>>>,
     consumed: bool,
 }
 
@@ -47,6 +52,12 @@ fn slot() -> &'static Mutex<SourceSlot> {
 /// own cacheable, content-addressed asset). Returns `false` if a session already baked the
 /// pending set (the install came too late — surface it, peers may diverge). Non-UTF-8 rejected.
 pub fn push_active_source(bytes: Vec<u8>) -> bool {
+    push_active_source_labeled(bytes, "")
+}
+
+/// [`push_active_source`] with a human label for diagnostics (per-script timing rows, logs).
+/// An empty label falls back to `file-<index>`.
+pub fn push_active_source_labeled(bytes: Vec<u8>, label: &str) -> bool {
     let Ok(source) = String::from_utf8(bytes) else {
         tracing::error!("push_active_source: script asset is not UTF-8 — ignoring");
         return false;
@@ -58,7 +69,9 @@ pub fn push_active_source(bytes: Vec<u8>) -> bool {
         slot.pending = None;
         slot.consumed = false;
     }
-    slot.pending.get_or_insert_with(Vec::new).push(source);
+    let pending = slot.pending.get_or_insert_with(Vec::new);
+    let label = if label.is_empty() { format!("file-{}", pending.len()) } else { label.to_string() };
+    pending.push((source, label));
     in_time
 }
 
@@ -93,31 +106,34 @@ pub fn plugins_for_session(default_source: &str) -> ScriptPlugins {
             if let Some(active) = &slot.active {
                 active.clone()
             } else {
-                let s = Arc::new(vec![default_source.to_string()]);
+                let s = Arc::new(vec![(default_source.to_string(), "default".to_string())]);
                 slot.active = Some(s.clone());
                 s
             }
         } else {
             let s = Arc::new(match slot.pending.take() {
                 Some(sources) if !sources.is_empty() => sources,
-                _ => vec![default_source.to_string()],
+                _ => vec![(default_source.to_string(), "default".to_string())],
             });
             slot.active = Some(s.clone());
             slot.consumed = true;
             s
         }
     };
-    ScriptPlugins(Arc::new(
-        sources
-            .iter()
-            .map(|source| {
-                Arc::new(LuaPlugin {
-                    source: source.clone(),
-                    systems: Arc::new(AtomicCell::new(Default::default())),
+    ScriptPlugins {
+        plugins: Arc::new(
+            sources
+                .iter()
+                .map(|(source, _)| {
+                    Arc::new(LuaPlugin {
+                        source: source.clone(),
+                        systems: Arc::new(AtomicCell::new(Default::default())),
+                    })
                 })
-            })
-            .collect(),
-    ))
+                .collect(),
+        ),
+        labels: Arc::new(sources.iter().map(|(_, label)| label.clone()).collect()),
+    }
 }
 
 /// Register a Lua runner system at the END of every core stage of `builder` (after that stage's
@@ -137,7 +153,7 @@ pub fn install_lua_runners(builder: &mut SystemStagesBuilder) {
                 // Dormant fast path: the `engine.exec` hop costs microseconds×allocs, so skip it
                 // unless some plugin actually needs this stage (still loading, pending startup,
                 // or has a closure registered here).
-                let stage_has_work = scripts.0.iter().any(|p| {
+                let stage_has_work = scripts.plugins.iter().any(|p| {
                     let systems = p.systems.borrow();
                     match &*systems {
                         LuaPluginSystemsState::NotLoaded => true,
@@ -152,6 +168,19 @@ pub fn install_lua_runners(builder: &mut SystemStagesBuilder) {
                 if !stage_has_work {
                     return;
                 }
+                // Per-script timing (see bones_ecs `StageTimings`): only when an enabled
+                // resource is present, and recorded AFTER the VM scope ends (the resource
+                // must not be borrowed while scripts run).
+                let timing = world
+                    .resources
+                    .get::<StageTimings>()
+                    .map(|t| t.enabled)
+                    .unwrap_or(false);
+                let mut plugin_ns: Vec<u64> = if timing {
+                    vec![0; scripts.plugins.len()]
+                } else {
+                    Vec::new()
+                };
                 engine.exec(|lua| {
                     Frozen::<Freeze![&'freeze World]>::in_scope(world, |world| {
                         lua.enter(|ctx| {
@@ -160,7 +189,8 @@ pub fn install_lua_runners(builder: &mut SystemStagesBuilder) {
                             worldref.add_to_env(ctx, env);
                         });
 
-                        for plugin in scripts.0.iter() {
+                        for (plugin_idx, plugin) in scripts.plugins.iter().enumerate() {
+                            let t0 = timing.then(std::time::Instant::now);
                             if !plugin.has_loaded() {
                                 if let Err(e) = plugin.load(engine.executor().clone(), lua) {
                                     eprintln!("lua plugin load error: {e}");
@@ -211,9 +241,27 @@ pub fn install_lua_runners(builder: &mut SystemStagesBuilder) {
                                     }
                                 }
                             }
+                            if let Some(t0) = t0 {
+                                plugin_ns[plugin_idx] += t0.elapsed().as_nanos() as u64;
+                            }
                         }
                     })
                 });
+                if timing {
+                    if let Some(mut t) = world.resources.get_mut::<StageTimings>() {
+                        let stage_name = lua_stage.name();
+                        for (i, ns) in plugin_ns.iter().enumerate() {
+                            if *ns > 0 {
+                                let label = scripts
+                                    .labels
+                                    .get(i)
+                                    .map(|l| l.as_str())
+                                    .unwrap_or("?");
+                                t.record(&stage_name, &format!("lua:{label}"), *ns);
+                            }
+                        }
+                    }
+                }
             },
         );
     }
@@ -232,7 +280,7 @@ pub fn install_resolve_lua_runner(builder: &mut SystemStagesBuilder) {
         CoreStage::Last,
         move |engine: Res<LuaEngine>, scripts: Res<ScriptPlugins>, world: &World| {
             // Dormant fast path: no plugin has resolve hooks (or still needs loading) → no VM hop.
-            let has_work = scripts.0.iter().any(|p| {
+            let has_work = scripts.plugins.iter().any(|p| {
                 let systems = p.systems.borrow();
                 match &*systems {
                     LuaPluginSystemsState::NotLoaded => true,
@@ -245,6 +293,13 @@ pub fn install_resolve_lua_runner(builder: &mut SystemStagesBuilder) {
             if !has_work {
                 return;
             }
+            let timing = world
+                .resources
+                .get::<StageTimings>()
+                .map(|t| t.enabled)
+                .unwrap_or(false);
+            let mut plugin_ns: Vec<u64> =
+                if timing { vec![0; scripts.plugins.len()] } else { Vec::new() };
             engine.exec(|lua| {
                 Frozen::<Freeze![&'freeze World]>::in_scope(world, |world| {
                     lua.enter(|ctx| {
@@ -253,7 +308,8 @@ pub fn install_resolve_lua_runner(builder: &mut SystemStagesBuilder) {
                         worldref.add_to_env(ctx, env);
                     });
 
-                    for plugin in scripts.0.iter() {
+                    for (plugin_idx, plugin) in scripts.plugins.iter().enumerate() {
+                        let t0 = timing.then(std::time::Instant::now);
                         // Lazy-load here too: a resolve batch can arrive before the first
                         // simulate tick (server boot joins).
                         if !plugin.has_loaded() {
@@ -279,9 +335,23 @@ pub fn install_resolve_lua_runner(builder: &mut SystemStagesBuilder) {
                                 tracing::error!("Error running lua resolve system: {e}");
                             }
                         }
+                        if let Some(t0) = t0 {
+                            plugin_ns[plugin_idx] += t0.elapsed().as_nanos() as u64;
+                        }
                     }
                 })
             });
+            if timing {
+                if let Some(mut t) = world.resources.get_mut::<StageTimings>() {
+                    for (i, ns) in plugin_ns.iter().enumerate() {
+                        if *ns > 0 {
+                            let label =
+                                scripts.labels.get(i).map(|l| l.as_str()).unwrap_or("?");
+                            t.record("resolve", &format!("lua:{label}"), *ns);
+                        }
+                    }
+                }
+            }
         },
     );
 }
