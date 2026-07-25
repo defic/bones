@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["CoreStage"],"struct":["CommandQueue","Commands","CurrentSystemStage","SessionStarted","SimpleSystemStage","SingleSuccessSystems","SystemStages","SystemStagesBuilder"],"trait":["StageLabel","SystemStage"]};
+window.SIDEBAR_ITEMS = {"enum":["CoreStage"],"struct":["CommandQueue","Commands","CurrentSystemStage","SessionStarted","SimpleSystemStage","SingleSuccessSystems","StageTimings","SystemStages","SystemStagesBuilder","TimingRow"],"trait":["StageLabel","SystemStage"]};

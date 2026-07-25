@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AccessError"],"macro":["Freeze"],"struct":["DynFreeze","FreezeGuard","Frozen","FrozenScope"],"trait":["DropGuard","Freeze"]};

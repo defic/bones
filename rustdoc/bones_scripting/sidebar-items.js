@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"macro":["Freeze"],"mod":["lua","prelude"],"struct":["ScriptingGamePlugin"]};
+window.SIDEBAR_ITEMS = {"macro":["Freeze"],"mod":["embedded","lua","prelude"],"struct":["ScriptingGamePlugin"]};

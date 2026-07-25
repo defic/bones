@@ -163,6 +163,86 @@
 <a href=#163 id=163 data-nosnippet>163</a>            <span class="macro">assert_eq!</span>(A::schema().layout(), B::schema().layout());
 <a href=#164 id=164 data-nosnippet>164</a>            <span class="macro">assert_eq!</span>(C::schema().layout(), D::schema().layout());
 <a href=#165 id=165 data-nosnippet>165</a>        }
-<a href=#166 id=166 data-nosnippet>166</a>    }
-<a href=#167 id=167 data-nosnippet>167</a>}
+<a href=#166 id=166 data-nosnippet>166</a>
+<a href=#167 id=167 data-nosnippet>167</a>        <span class="doccomment">/// A `GameInput`-shaped payload enum: named-field variants, one holding a heap value
+<a href=#168 id=168 data-nosnippet>168</a>        /// (`SVec`) so `set_variant`'s drop-the-old-payload path is exercised for real.
+<a href=#169 id=169 data-nosnippet>169</a>        </span><span class="attr">#[derive(HasSchema, Clone, Debug, PartialEq)]
+<a href=#170 id=170 data-nosnippet>170</a>        #[schema_module(<span class="kw">crate</span>)]
+<a href=#171 id=171 data-nosnippet>171</a>        #[repr(C, u8)]
+<a href=#172 id=172 data-nosnippet>172</a>        </span><span class="kw">pub enum </span>Verb {
+<a href=#173 id=173 data-nosnippet>173</a>            Damage { victim: u32, amount: u32 },
+<a href=#174 id=174 data-nosnippet>174</a>            SetMode { kind: u8 },
+<a href=#175 id=175 data-nosnippet>175</a>            Tag { items: SVec&lt;u64&gt; },
+<a href=#176 id=176 data-nosnippet>176</a>        }
+<a href=#177 id=177 data-nosnippet>177</a>        <span class="kw">impl </span>Default <span class="kw">for </span>Verb {
+<a href=#178 id=178 data-nosnippet>178</a>            <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+<a href=#179 id=179 data-nosnippet>179</a>                Verb::Damage { victim: <span class="number">0</span>, amount: <span class="number">0 </span>}
+<a href=#180 id=180 data-nosnippet>180</a>            }
+<a href=#181 id=181 data-nosnippet>181</a>        }
+<a href=#182 id=182 data-nosnippet>182</a>
+<a href=#183 id=183 data-nosnippet>183</a>        <span class="doccomment">/// `set_variant` writes the tag, default-initializes the new payload, and the reflected
+<a href=#184 id=184 data-nosnippet>184</a>        /// value round-trips back to the real Rust enum.
+<a href=#185 id=185 data-nosnippet>185</a>        </span><span class="attr">#[test]
+<a href=#186 id=186 data-nosnippet>186</a>        </span><span class="kw">fn </span>enum_set_variant_switches_and_defaults_payload() {
+<a href=#187 id=187 data-nosnippet>187</a>            <span class="kw">let </span><span class="kw-2">mut </span>v = Verb::default();
+<a href=#188 id=188 data-nosnippet>188</a>            {
+<a href=#189 id=189 data-nosnippet>189</a>                <span class="kw">let </span>r = <span class="kw">crate</span>::ptr::SchemaRefMut::new(<span class="kw-2">&amp;mut </span>v);
+<a href=#190 id=190 data-nosnippet>190</a>                <span class="kw">let </span><span class="kw">crate</span>::ptr::SchemaRefMutAccess::Enum(<span class="kw-2">mut </span>e) = r.into_access_mut() <span class="kw">else </span>{
+<a href=#191 id=191 data-nosnippet>191</a>                    <span class="macro">panic!</span>(<span class="string">"not an enum access"</span>);
+<a href=#192 id=192 data-nosnippet>192</a>                };
+<a href=#193 id=193 data-nosnippet>193</a>                <span class="macro">assert_eq!</span>(e.variant_name(), <span class="string">"Damage"</span>);
+<a href=#194 id=194 data-nosnippet>194</a>                <span class="macro">assert!</span>(e.set_variant(<span class="string">"SetMode"</span>), <span class="string">"known variant must switch"</span>);
+<a href=#195 id=195 data-nosnippet>195</a>                <span class="macro">assert_eq!</span>(e.variant_name(), <span class="string">"SetMode"</span>);
+<a href=#196 id=196 data-nosnippet>196</a>                <span class="macro">assert!</span>(!e.set_variant(<span class="string">"Nope"</span>), <span class="string">"unknown variant must return false"</span>);
+<a href=#197 id=197 data-nosnippet>197</a>                <span class="macro">assert_eq!</span>(e.variant_name(), <span class="string">"SetMode"</span>, <span class="string">"failed switch must not disturb"</span>);
+<a href=#198 id=198 data-nosnippet>198</a>            }
+<a href=#199 id=199 data-nosnippet>199</a>            <span class="macro">assert_eq!</span>(v, Verb::SetMode { kind: <span class="number">0 </span>}, <span class="string">"payload default-initialized"</span>);
+<a href=#200 id=200 data-nosnippet>200</a>        }
+<a href=#201 id=201 data-nosnippet>201</a>
+<a href=#202 id=202 data-nosnippet>202</a>        <span class="doccomment">/// Field access on an enum ref resolves through the CURRENT variant — read and write —
+<a href=#203 id=203 data-nosnippet>203</a>        /// which is what lets Lua do `gi.victim = …` without naming the variant.
+<a href=#204 id=204 data-nosnippet>204</a>        </span><span class="attr">#[test]
+<a href=#205 id=205 data-nosnippet>205</a>        </span><span class="kw">fn </span>enum_field_access_resolves_through_current_variant() {
+<a href=#206 id=206 data-nosnippet>206</a>            <span class="kw">let </span><span class="kw-2">mut </span>v = Verb::Damage { victim: <span class="number">7</span>, amount: <span class="number">9 </span>};
+<a href=#207 id=207 data-nosnippet>207</a>            <span class="comment">// Read through the shared ref.
+<a href=#208 id=208 data-nosnippet>208</a>            </span>{
+<a href=#209 id=209 data-nosnippet>209</a>                <span class="kw">let </span>r = <span class="kw">crate</span>::ptr::SchemaRef::new(<span class="kw-2">&amp;</span>v);
+<a href=#210 id=210 data-nosnippet>210</a>                <span class="kw">let </span>victim = r.field(<span class="string">"victim"</span>).expect(<span class="string">"field via current variant"</span>);
+<a href=#211 id=211 data-nosnippet>211</a>                <span class="macro">assert_eq!</span>(<span class="kw-2">*</span>victim.cast::&lt;u32&gt;(), <span class="number">7</span>);
+<a href=#212 id=212 data-nosnippet>212</a>                <span class="macro">assert!</span>(r.field(<span class="string">"kind"</span>).is_none(), <span class="string">"other variant's field must miss"</span>);
+<a href=#213 id=213 data-nosnippet>213</a>            }
+<a href=#214 id=214 data-nosnippet>214</a>            <span class="comment">// Write through the mut ref.
+<a href=#215 id=215 data-nosnippet>215</a>            </span>{
+<a href=#216 id=216 data-nosnippet>216</a>                <span class="kw">let </span>r = <span class="kw">crate</span>::ptr::SchemaRefMut::new(<span class="kw-2">&amp;mut </span>v);
+<a href=#217 id=217 data-nosnippet>217</a>                <span class="kw">let </span><span class="kw-2">mut </span>amount = r
+<a href=#218 id=218 data-nosnippet>218</a>                    .into_field(<span class="string">"amount"</span>)
+<a href=#219 id=219 data-nosnippet>219</a>                    .ok()
+<a href=#220 id=220 data-nosnippet>220</a>                    .expect(<span class="string">"mut field via current variant"</span>);
+<a href=#221 id=221 data-nosnippet>221</a>                <span class="kw-2">*</span>amount.cast_mut::&lt;u32&gt;() = <span class="number">42</span>;
+<a href=#222 id=222 data-nosnippet>222</a>            }
+<a href=#223 id=223 data-nosnippet>223</a>            <span class="macro">assert_eq!</span>(v, Verb::Damage { victim: <span class="number">7</span>, amount: <span class="number">42 </span>});
+<a href=#224 id=224 data-nosnippet>224</a>        }
+<a href=#225 id=225 data-nosnippet>225</a>
+<a href=#226 id=226 data-nosnippet>226</a>        <span class="doccomment">/// Switching AWAY from a heap-holding variant must drop its payload (no leak, no
+<a href=#227 id=227 data-nosnippet>227</a>        /// double-free when the enum itself drops later), and switching INTO it must yield a
+<a href=#228 id=228 data-nosnippet>228</a>        /// usable default (empty vec) — the field-by-field drop/default-init contract.
+<a href=#229 id=229 data-nosnippet>229</a>        </span><span class="attr">#[test]
+<a href=#230 id=230 data-nosnippet>230</a>        </span><span class="kw">fn </span>enum_set_variant_drops_old_heap_payload() {
+<a href=#231 id=231 data-nosnippet>231</a>            <span class="kw">let </span><span class="kw-2">mut </span>v = Verb::Tag { items: [<span class="number">1u64</span>, <span class="number">2</span>, <span class="number">3</span>].into_iter().collect() };
+<a href=#232 id=232 data-nosnippet>232</a>            {
+<a href=#233 id=233 data-nosnippet>233</a>                <span class="kw">let </span>r = <span class="kw">crate</span>::ptr::SchemaRefMut::new(<span class="kw-2">&amp;mut </span>v);
+<a href=#234 id=234 data-nosnippet>234</a>                <span class="kw">let </span><span class="kw">crate</span>::ptr::SchemaRefMutAccess::Enum(<span class="kw-2">mut </span>e) = r.into_access_mut() <span class="kw">else </span>{
+<a href=#235 id=235 data-nosnippet>235</a>                    <span class="macro">panic!</span>(<span class="string">"not an enum access"</span>);
+<a href=#236 id=236 data-nosnippet>236</a>                };
+<a href=#237 id=237 data-nosnippet>237</a>                e.set_variant(<span class="string">"Damage"</span>);
+<a href=#238 id=238 data-nosnippet>238</a>                e.set_variant(<span class="string">"Tag"</span>);
+<a href=#239 id=239 data-nosnippet>239</a>            }
+<a href=#240 id=240 data-nosnippet>240</a>            <span class="macro">assert_eq!</span>(
+<a href=#241 id=241 data-nosnippet>241</a>                v,
+<a href=#242 id=242 data-nosnippet>242</a>                Verb::Tag { items: SVec::default() },
+<a href=#243 id=243 data-nosnippet>243</a>                <span class="string">"re-entered heap variant starts default-empty"
+<a href=#244 id=244 data-nosnippet>244</a>            </span>);
+<a href=#245 id=245 data-nosnippet>245</a>        }
+<a href=#246 id=246 data-nosnippet>246</a>    }
+<a href=#247 id=247 data-nosnippet>247</a>}
 </code></pre></div></section></main></body></html>
