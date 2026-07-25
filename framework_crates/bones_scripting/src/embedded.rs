@@ -267,6 +267,66 @@ pub fn install_lua_runners(builder: &mut SystemStagesBuilder) {
     }
 }
 
+/// One-shot console chunks queued by the host — e.g. an admin "eval" arriving as a REPLICATED
+/// game input, pushed here by the host's resolve system and drained the same run by the
+/// runner from [`install_eval_runner`]. `SkipSerialize` scratch: determinism comes from the
+/// chunks being replicated inputs (every peer queues the same sources at the same tick), not
+/// from this resource riding the snapshot.
+#[derive(HasSchema, Clone, Default)]
+#[schema(opaque)]
+#[type_data(SkipSerialize)]
+pub struct EvalQueue(pub Vec<String>);
+
+/// Register the console-eval runner: drains [`EvalQueue`], compiling + executing each chunk
+/// in the full bindings env (`resources` / `components` / `entities` / `s(..)`). Install it
+/// AFTER the host's resolve systems on the same stage, so a chunk queued while applying a
+/// batch runs inside that same authoritative step on every peer. Compile/runtime errors log
+/// and drop the chunk — a bad console line must never kill the sim (and errors identically
+/// on every peer, so determinism holds either way).
+pub fn install_eval_runner(builder: &mut SystemStagesBuilder) {
+    builder.add_system_to_stage(
+        CoreStage::Update,
+        move |engine: Res<LuaEngine>, world: &World| {
+            let chunks: Vec<String> = {
+                let Some(mut q) = world.resources.get_mut::<EvalQueue>() else {
+                    return;
+                };
+                if q.0.is_empty() {
+                    return;
+                }
+                std::mem::take(&mut q.0)
+            };
+            engine.exec(|lua| {
+                Frozen::<Freeze![&'freeze World]>::in_scope(world, |world| {
+                    lua.enter(|ctx| {
+                        let env = ctx.singletons().get(ctx, bindings::env);
+                        let worldref = WorldRef(world);
+                        worldref.add_to_env(ctx, env);
+                    });
+                    for src in &chunks {
+                        let executor = lua.try_enter(|ctx| {
+                            let env = ctx.singletons().get(ctx, bindings::env);
+                            let closure = crate::lua::piccolo::Closure::load_with_env(
+                                ctx,
+                                None,
+                                src.as_bytes(),
+                                env,
+                            )?;
+                            let ex =
+                                crate::lua::piccolo::Executor::start(ctx, closure.into(), ());
+                            Ok(ctx.registry().stash(&ctx, ex))
+                        });
+                        if let Err(e) = executor.and_then(|ex| lua.execute::<()>(&ex)) {
+                            eprintln!("lua eval error: {e}");
+                            tracing::error!("lua eval error: {e}");
+                        }
+                    }
+                })
+            });
+        },
+    );
+}
+
 /// Register the CONFIRMED-phase Lua runner: appended after the host's resolve system(s), it
 /// executes every plugin's `add_resolve_system` closures once per authoritative batch, in
 /// plugin order — post-application, so hooks see the batch's effects (joins applied, kills
