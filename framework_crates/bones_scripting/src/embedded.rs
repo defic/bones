@@ -277,16 +277,108 @@ pub fn install_lua_runners(builder: &mut SystemStagesBuilder) {
 #[type_data(SkipSerialize)]
 pub struct EvalQueue(pub Vec<String>);
 
-/// Register the console-eval runner: drains [`EvalQueue`], compiling + executing each chunk
-/// in the full bindings env (`resources` / `components` / `entities` / `s(..)`). Install it
+/// One formatted result line per executed [`EvalQueue`] chunk, in execution order — every
+/// peer computes them locally (same chunks, same state), so the server can answer the admin
+/// request AND an in-client console can render them without any extra wire traffic. Capped
+/// FIFO (a peer with no console just cycles the buffer). `SkipSerialize`: presentation.
+#[derive(HasSchema, Clone, Default)]
+#[schema(opaque)]
+#[type_data(SkipSerialize)]
+pub struct EvalResults(pub Vec<String>);
+
+/// Most results a peer keeps before dropping the oldest.
+const EVAL_RESULTS_CAP: usize = 32;
+
+/// Format a Lua value for the console: primitives natively; tables/functions/userdata as a
+/// type tag (calling `__tostring` metamethods would need another executor pump — reflected
+/// field reads land here as primitives anyway, which is the case that matters).
+fn fmt_lua_value(v: &crate::lua::piccolo::Value) -> String {
+    use crate::lua::piccolo::Value;
+    match v {
+        Value::Nil => "nil".to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Integer(i) => i.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => String::from_utf8_lossy(s.as_bytes()).into_owned(),
+        Value::Table(_) => "<table>".to_string(),
+        Value::Function(_) => "<function>".to_string(),
+        Value::Thread(_) => "<thread>".to_string(),
+        Value::UserData(_) => "<userdata>".to_string(),
+    }
+}
+
+/// Compile + execute ONE console chunk against `world` (which must carry a [`LuaEngine`]
+/// resource) and return its formatted result line. An expression chunk is auto-wrapped as
+/// `return <src>` (fallback: plain statement chunk, result "ok"), so `…race.laps` answers
+/// with the value. Errors come back as `error: …` — never a panic.
+///
+/// Two callers, two determinism postures:
+/// - the replicated eval runner (below) — every peer runs the same chunk on the same state;
+/// - a host's read-only QUERY path — run it on a CLONE of the state, so a chunk that
+///   accidentally writes mutates the discarded clone, not the live sim.
+pub fn eval_chunk(world: &World, src: &str) -> String {
+    let Some(engine) = world.resources.get::<LuaEngine>() else {
+        return "error: no LuaEngine in world".to_string();
+    };
+    let mut result = String::new();
+    engine.exec(|lua| {
+        Frozen::<Freeze![&'freeze World]>::in_scope(world, |world| {
+            lua.enter(|ctx| {
+                let env = ctx.singletons().get(ctx, bindings::env);
+                let worldref = WorldRef(world);
+                worldref.add_to_env(ctx, env);
+            });
+            // Expression first (captures a return value), statement as fallback.
+            let with_return = format!("return {src}");
+            let executor = lua.try_enter(|ctx| {
+                let env = ctx.singletons().get(ctx, bindings::env);
+                let closure = crate::lua::piccolo::Closure::load_with_env(
+                    ctx,
+                    None,
+                    with_return.as_bytes(),
+                    env,
+                )
+                .or_else(|_| {
+                    crate::lua::piccolo::Closure::load_with_env(ctx, None, src.as_bytes(), env)
+                })?;
+                let ex = crate::lua::piccolo::Executor::start(ctx, closure.into(), ());
+                Ok(ctx.registry().stash(&ctx, ex))
+            });
+            let line = executor.and_then(|ex| {
+                lua.finish(&ex);
+                lua.try_enter(|ctx| {
+                    let ex = ctx.registry().fetch(&ex);
+                    let vals = ex.take_result::<crate::lua::piccolo::Variadic<
+                        Vec<crate::lua::piccolo::Value>,
+                    >>(ctx)??;
+                    Ok(if vals.is_empty() {
+                        "ok".to_string()
+                    } else {
+                        vals.iter().map(fmt_lua_value).collect::<Vec<_>>().join(", ")
+                    })
+                })
+            });
+            result = match line {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("lua eval error: {e}");
+                    format!("error: {e}")
+                }
+            };
+        })
+    });
+    result
+}
+
+/// Register the console-eval runner: drains [`EvalQueue`], executing each chunk via
+/// [`eval_chunk`] and pushing one result line per chunk into [`EvalResults`]. Install it
 /// AFTER the host's resolve systems on the same stage, so a chunk queued while applying a
-/// batch runs inside that same authoritative step on every peer. Compile/runtime errors log
-/// and drop the chunk — a bad console line must never kill the sim (and errors identically
-/// on every peer, so determinism holds either way).
+/// batch runs inside that same authoritative step on every peer. A bad chunk becomes an
+/// `error: …` line — never kills the sim, and errors identically on every peer.
 pub fn install_eval_runner(builder: &mut SystemStagesBuilder) {
     builder.add_system_to_stage(
         CoreStage::Update,
-        move |engine: Res<LuaEngine>, world: &World| {
+        move |world: &World| {
             let chunks: Vec<String> = {
                 let Some(mut q) = world.resources.get_mut::<EvalQueue>() else {
                     return;
@@ -296,33 +388,15 @@ pub fn install_eval_runner(builder: &mut SystemStagesBuilder) {
                 }
                 std::mem::take(&mut q.0)
             };
-            engine.exec(|lua| {
-                Frozen::<Freeze![&'freeze World]>::in_scope(world, |world| {
-                    lua.enter(|ctx| {
-                        let env = ctx.singletons().get(ctx, bindings::env);
-                        let worldref = WorldRef(world);
-                        worldref.add_to_env(ctx, env);
-                    });
-                    for src in &chunks {
-                        let executor = lua.try_enter(|ctx| {
-                            let env = ctx.singletons().get(ctx, bindings::env);
-                            let closure = crate::lua::piccolo::Closure::load_with_env(
-                                ctx,
-                                None,
-                                src.as_bytes(),
-                                env,
-                            )?;
-                            let ex =
-                                crate::lua::piccolo::Executor::start(ctx, closure.into(), ());
-                            Ok(ctx.registry().stash(&ctx, ex))
-                        });
-                        if let Err(e) = executor.and_then(|ex| lua.execute::<()>(&ex)) {
-                            eprintln!("lua eval error: {e}");
-                            tracing::error!("lua eval error: {e}");
-                        }
-                    }
-                })
-            });
+            let results: Vec<String> =
+                chunks.iter().map(|src| eval_chunk(world, src)).collect();
+            if let Some(mut r) = world.resources.get_mut::<EvalResults>() {
+                r.0.extend(results);
+                let overflow = r.0.len().saturating_sub(EVAL_RESULTS_CAP);
+                if overflow > 0 {
+                    r.0.drain(..overflow);
+                }
+            }
         },
     );
 }
