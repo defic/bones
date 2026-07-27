@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["install_lua_runners","install_resolve_lua_runner","plugins_for_session","push_active_source","push_active_source_labeled","reset_active_source","set_active_source"],"struct":["ScriptPlugins"]};
+window.SIDEBAR_ITEMS = {"fn":["eval_chunk","install_eval_runner","install_lua_runners","install_resolve_lua_runner","plugins_for_session","push_active_source","push_active_source_labeled","reset_active_source","set_active_source"],"struct":["EvalPrelude","EvalQueue","EvalResults","ScriptPlugins"]};
