@@ -289,6 +289,17 @@ pub struct EvalResults(pub Vec<String>);
 /// Most results a peer keeps before dropping the oldest.
 const EVAL_RESULTS_CAP: usize = 32;
 
+/// Game-defined console prelude: Lua PREPENDED to every [`eval_chunk`] source at COMPILE time
+/// (never on the wire — a replicated console input stays just the user's line). The intended
+/// use is `local` aliases that make console lines terse:
+/// `local tune = resources:get(s("Tune"))` → users type `tune.race.laps = 5`.
+/// Insert it as a resource at session build; identical on every peer by construction (it's
+/// compiled-in game code). `SkipSerialize`: static config, not state.
+#[derive(HasSchema, Clone, Default)]
+#[schema(opaque)]
+#[type_data(SkipSerialize)]
+pub struct EvalPrelude(pub String);
+
 /// Format a Lua value for the console: primitives natively; tables/functions/userdata as a
 /// type tag (calling `__tostring` metamethods would need another executor pump — reflected
 /// field reads land here as primitives anyway, which is the case that matters).
@@ -320,6 +331,11 @@ pub fn eval_chunk(world: &World, src: &str) -> String {
     let Some(engine) = world.resources.get::<LuaEngine>() else {
         return "error: no LuaEngine in world".to_string();
     };
+    let prelude = world
+        .resources
+        .get::<EvalPrelude>()
+        .map(|p| p.0.clone())
+        .unwrap_or_default();
     let mut result = String::new();
     engine.exec(|lua| {
         Frozen::<Freeze![&'freeze World]>::in_scope(world, |world| {
@@ -328,8 +344,10 @@ pub fn eval_chunk(world: &World, src: &str) -> String {
                 let worldref = WorldRef(world);
                 worldref.add_to_env(ctx, env);
             });
-            // Expression first (captures a return value), statement as fallback.
-            let with_return = format!("return {src}");
+            // Game prelude (alias locals), then: expression first (captures a return value),
+            // statement as fallback.
+            let with_return = format!("{prelude}\nreturn {src}");
+            let plain = format!("{prelude}\n{src}");
             let executor = lua.try_enter(|ctx| {
                 let env = ctx.singletons().get(ctx, bindings::env);
                 let closure = crate::lua::piccolo::Closure::load_with_env(
@@ -339,7 +357,7 @@ pub fn eval_chunk(world: &World, src: &str) -> String {
                     env,
                 )
                 .or_else(|_| {
-                    crate::lua::piccolo::Closure::load_with_env(ctx, None, src.as_bytes(), env)
+                    crate::lua::piccolo::Closure::load_with_env(ctx, None, plain.as_bytes(), env)
                 })?;
                 let ex = crate::lua::piccolo::Executor::start(ctx, closure.into(), ());
                 Ok(ctx.registry().stash(&ctx, ex))
