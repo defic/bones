@@ -147,8 +147,9 @@ pub fn install_lua_runners(builder: &mut SystemStagesBuilder) {
         CoreStage::PostUpdate,
         CoreStage::Last,
     ] {
-        builder.add_system_to_stage(
-            lua_stage,
+        // Named explicitly: the closure would otherwise report THIS function's name in the
+        // per-system timing table, reading as if "install" ran every frame.
+        let mut runner = IntoSystem::system(
             move |engine: Res<LuaEngine>, scripts: Res<ScriptPlugins>, world: &World| {
                 // Dormant fast path: the `engine.exec` hop costs microseconds×allocs, so skip it
                 // unless some plugin actually needs this stage (still loading, pending startup,
@@ -264,6 +265,8 @@ pub fn install_lua_runners(builder: &mut SystemStagesBuilder) {
                 }
             },
         );
+        runner.name = "lua_runner";
+        builder.add_system_to_stage(lua_stage, runner);
     }
 }
 
@@ -394,8 +397,7 @@ pub fn eval_chunk(world: &World, src: &str) -> String {
 /// batch runs inside that same authoritative step on every peer. A bad chunk becomes an
 /// `error: …` line — never kills the sim, and errors identically on every peer.
 pub fn install_eval_runner(builder: &mut SystemStagesBuilder) {
-    builder.add_system_to_stage(
-        CoreStage::Update,
+    let mut runner = IntoSystem::system(
         move |world: &World| {
             let chunks: Vec<String> = {
                 let Some(mut q) = world.resources.get_mut::<EvalQueue>() else {
@@ -417,6 +419,8 @@ pub fn install_eval_runner(builder: &mut SystemStagesBuilder) {
             }
         },
     );
+    runner.name = "lua_eval_console";
+    builder.add_system_to_stage(CoreStage::Update, runner);
 }
 
 /// Register the CONFIRMED-phase Lua runner: appended after the host's resolve system(s), it
@@ -428,8 +432,7 @@ pub fn install_eval_runner(builder: &mut SystemStagesBuilder) {
 /// drains after its SIMULATE stages (e.g. a damage queue) are NOT re-drained here — pushing
 /// into them from a resolve hook does nothing until the game adds a resolve-side pipeline.
 pub fn install_resolve_lua_runner(builder: &mut SystemStagesBuilder) {
-    builder.add_system_to_stage(
-        CoreStage::Last,
+    let mut runner = IntoSystem::system(
         move |engine: Res<LuaEngine>, scripts: Res<ScriptPlugins>, world: &World| {
             // Dormant fast path: no plugin has resolve hooks (or still needs loading) → no VM hop.
             let has_work = scripts.plugins.iter().any(|p| {
@@ -506,4 +509,6 @@ pub fn install_resolve_lua_runner(builder: &mut SystemStagesBuilder) {
             }
         },
     );
+    runner.name = "lua_resolve_hooks";
+    builder.add_system_to_stage(CoreStage::Last, runner);
 }
